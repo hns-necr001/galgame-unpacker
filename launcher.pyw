@@ -17,6 +17,7 @@ import tempfile
 import threading
 import subprocess
 import traceback
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 # ---------- 路径 ----------
@@ -110,6 +111,64 @@ def detect_game_type(directory):
     except Exception:
         pass
     return None
+
+def _extract_archive(archive_path, dest_dir):
+    """把压缩包解压到 dest_dir，支持 zip / 7z / rar（7z/rar 依赖系统已装 7-Zip 或 WinRAR）。"""
+    ext = os.path.splitext(archive_path)[1].lower()
+    ensure_dir(dest_dir)
+    if ext == '.zip':
+        import zipfile
+        with zipfile.ZipFile(archive_path, 'r') as z:
+            base = os.path.abspath(dest_dir)
+            for member in z.infolist():
+                target = os.path.abspath(os.path.join(dest_dir, member.filename))
+                if not target.startswith(base + os.sep):
+                    continue  # 防 zip 路径穿越
+                if member.is_dir():
+                    os.makedirs(target, exist_ok=True)
+                else:
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    with z.open(member) as src, open(target, 'wb') as dst:
+                        shutil.copyfileobj(src, dst)
+    elif ext in ('.7z', '.rar'):
+        tool = None
+        for cand in (r'C:\Program Files\7-Zip\7z.exe',
+                     r'C:\Program Files\WinRAR\WinRAR.exe',
+                     r'C:\Program Files\WinRAR\UnRAR.exe'):
+            if os.path.exists(cand):
+                tool = cand
+                break
+        if not tool:
+            raise RuntimeError('解压 7z/rar 需要安装 7-Zip 或 WinRAR')
+        subprocess.run([tool, 'x', '-y', '-o' + dest_dir, archive_path],
+                       check=True, capture_output=True)
+    else:
+        raise RuntimeError(f'不支持的压缩格式：{ext}')
+
+
+def _find_game_root(extract_dir):
+    """在解压目录里自动找游戏根目录（包含 .xp3 或 manosaba_Data 的目录）。"""
+    candidates = [extract_dir]
+    try:
+        subdirs = [d for d in os.listdir(extract_dir)
+                   if os.path.isdir(os.path.join(extract_dir, d))]
+        if len(subdirs) == 1:
+            candidates.append(os.path.join(extract_dir, subdirs[0]))
+    except Exception:
+        pass
+    for cand in candidates:
+        if detect_game_type(cand) is not None:
+            return cand
+    try:
+        for d in os.listdir(extract_dir):
+            sub = os.path.join(extract_dir, d)
+            if os.path.isdir(sub) and detect_game_type(sub) is not None:
+                return sub
+    except Exception:
+        pass
+    return extract_dir
+
+
 
 
 # ---------- KiriKiri（.xp3） ----------
@@ -843,9 +902,12 @@ class App:
 
         self.path_var = tk.StringVar()
         self.out_var = tk.StringVar()
+        self.archive_var = tk.StringVar()
         self.name_var = tk.StringVar(value='提取资源')
         self.status_var = tk.StringVar(value='等待开始...')
         self.progress_var = tk.IntVar(value=0)
+        self._prog_last = None
+        self.stop_requested = False
 
         info = tk.Label(
             root,
@@ -853,6 +915,12 @@ class App:
                  '输出：所选输出目录下自动生成自定义文件夹，内含 BGM / CG / 背景 / 立绘 四个子文件夹',
             fg='#555555', anchor='w', justify='left')
         info.pack(fill='x', padx=10, pady=(10, 0))
+
+        arcrow = tk.Frame(root)
+        arcrow.pack(fill='x', padx=10, pady=5)
+        tk.Label(arcrow, text='选取压缩包：').pack(side='left')
+        tk.Entry(arcrow, textvariable=self.archive_var, width=62).pack(side='left', fill='x', expand=True, padx=5)
+        tk.Button(arcrow, text='选取压缩包', command=self.choose_archive).pack(side='left')
 
         top = tk.Frame(root)
         top.pack(fill='x', padx=10, pady=5)
@@ -874,18 +942,52 @@ class App:
 
         progrow = tk.Frame(root)
         progrow.pack(fill='x', padx=10, pady=5)
-        self.progress_bar = ttk.Progressbar(progrow, variable=self.progress_var, maximum=1)
-        self.progress_bar.pack(fill='x', side='left', expand=True)
-        tk.Label(progrow, textvariable=self.status_var, width=46).pack(side='left', padx=5)
+        self.progress_bar = ttk.Progressbar(progrow, variable=self.progress_var, maximum=1, length=380)
+        self.progress_bar.pack(side='left', padx=(0, 10))
+        tk.Label(progrow, textvariable=self.status_var, anchor='w').pack(side='right', padx=(10, 0))
 
-        tk.Button(root, text='开始解包', command=self.start).pack(pady=5)
+        btnrow = tk.Frame(root)
+        btnrow.pack(pady=5)
+        tk.Button(btnrow, text='开始解包', command=self.start).pack(side='left', padx=5)
+        tk.Button(btnrow, text='停止解包', command=self.stop).pack(side='left', padx=5)
 
         self.log_box = scrolledtext.ScrolledText(root, height=16, state='disabled')
         self.log_box.pack(fill='both', expand=True, padx=10, pady=(0, 10))
 
         self.log_queue = queue.Queue()
         self.worker = None
+        self.archive_worker = None
         root.after(100, self.poll_queue)
+
+    def choose_archive(self):
+        path = filedialog.askopenfilename(
+            title='请选择游戏压缩包',
+            filetypes=[('压缩包', '*.zip *.7z *.rar'), ('所有文件', '*.*')])
+        if not path:
+            return
+        self.archive_var.set(path)
+        if self.archive_worker and self.archive_worker.is_alive():
+            messagebox.showinfo('提示', '正在解压中，请稍候')
+            return
+        self.status_var.set('正在解压压缩包...')
+        self.archive_worker = threading.Thread(
+            target=self.do_extract_archive, args=(path,), daemon=True)
+        self.archive_worker.start()
+
+    def do_extract_archive(self, archive_path):
+        try:
+            dest = tempfile.mkdtemp(prefix='galgame_arc_')
+            self.log('[解压] 开始解压：' + archive_path)
+            _extract_archive(archive_path, dest)
+            game_root = _find_game_root(dest)
+            self.root.after(0, lambda: self.path_var.set(game_root))
+            self.log(f'[解压] 完成，识别到游戏目录：{game_root}')
+            self.log_queue.put(('progress', 0, 1, '解压完成，可开始解包'))
+            self.root.after(0, lambda: messagebox.showinfo(
+                '解压完成', '压缩包已解压，游戏目录已自动填入，点击“开始解包”即可。'))
+        except Exception as exc:
+            self.log(f'[解压失败] {exc!r}')
+            self.log_queue.put(('progress', 0, 1, '解压失败'))
 
     def choose_dir(self):
         path = filedialog.askdirectory(title='请选择游戏目录')
@@ -914,7 +1016,24 @@ class App:
                     if total > 0:
                         self.progress_bar.configure(maximum=total)
                         self.progress_var.set(cur)
-                    self.status_var.set(f'{text}  ({cur}/{total})')
+                    # 简单估算剩余时间
+                    eta = ''
+                    now = time.time()
+                    if self._prog_last and total > 0 and 0 < cur <= total:
+                        t0, c0 = self._prog_last
+                        dt = now - t0
+                        dc = cur - c0
+                        if dt > 0 and dc > 0:
+                            speed = dc / dt
+                            remain = (total - cur) / speed
+                            if remain > 0:
+                                if remain < 60:
+                                    eta = f'，预计剩余 {int(remain)} 秒'
+                                else:
+                                    eta = f'，预计剩余 {remain/60:.1f} 分钟'
+                    if cur > 0:
+                        self._prog_last = (now, cur)
+                    self.status_var.set(f'{text}  ({cur}/{total}){eta}')
         except queue.Empty:
             pass
         self.root.after(100, self.poll_queue)
@@ -930,7 +1049,16 @@ class App:
         self.log_queue.put(('log', msg))
 
     def progress(self, archive, current, total, text):
+        if self.stop_requested:
+            raise RuntimeError('用户已停止解包')
         self.log_queue.put(('progress', current, total, text))
+
+    def stop(self):
+        if self.worker and self.worker.is_alive():
+            self.stop_requested = True
+            self.status_var.set('正在停止...')
+        else:
+            messagebox.showinfo('提示', '当前没有正在运行的解包任务')
 
     def start(self):
         path = self.path_var.get().strip()
@@ -976,6 +1104,7 @@ class App:
         self.progress_var.set(0)
         self.progress_bar.configure(maximum=1)
         self.status_var.set('开始解包...')
+        self.stop_requested = False
 
         self.worker = threading.Thread(
             target=self.worker_main, args=(path, gtype, out_root, out_name), daemon=True)
@@ -990,7 +1119,11 @@ class App:
             self.log('[全部完成]')
             self.progress('', 0, 1, '全部完成')
         except Exception:
-            self.log(traceback.format_exc())
+            if self.stop_requested:
+                self.log('[已停止] 解包已停止')
+                self.log_queue.put(('progress', 0, 1, '已停止'))
+            else:
+                self.log(traceback.format_exc())
 
 
 def main_cli():
