@@ -1,0 +1,12 @@
+# 运行时核心依赖
+UnityPy==1.25.3
+Pillow>=9.0
+numpy>=1.20
+
+# Unity 贴图解码
+astc_encoder
+etcpak
+texture2ddecoder
+
+# 压缩/辅助
+lz4>=4.0

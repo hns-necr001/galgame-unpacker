@@ -1,0 +1,18 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller 打包产物
+build/
+dist/
+release/
+*.spec.bak
+
+# 运行时日志与临时文件
+*.log
+解包日志.txt
+*_test*
+*.bak
