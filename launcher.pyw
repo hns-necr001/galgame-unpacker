@@ -355,6 +355,56 @@ def _is_atri_style(game_dir):
             and os.path.exists(os.path.join(game_dir, 'fgimage.xp3'))
             and os.path.exists(os.path.join(game_dir, 'vol1.xp3')))
 
+def _is_steam_xp3(game_dir):
+    """检测 Steam 版 xp3：索引能读但条目文件名是 32 位十六进制哈希。"""
+    for arch in ('bgimage.xp3', 'data.xp3', 'fgimage.xp3', 'vol1.xp3'):
+        p = os.path.join(game_dir, arch)
+        if not os.path.exists(p):
+            continue
+        try:
+            with open(p, 'rb') as f:
+                reader = XP3Reader(f, True)
+                entries = list(reader.file_index.entries)
+                if not entries:
+                    continue
+                hash_count = sum(
+                    1 for e in entries if re.fullmatch(r'[0-9a-f]{32}', e.file_path))
+                if hash_count / len(entries) > 0.5:
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def _steam_decrypt(data):
+    """Steam 版数据：常见格式直接返回；否则暴力试单字节 XOR，能匹配常见格式就还原。"""
+    if data[:4] == b'\x89PNG':
+        return data, '.png'
+    if data[:4] == b'OggS':
+        return data, '.ogg'
+    if data[:4] == b'RIFF':
+        if data[8:12] == b'WEBP':
+            return data, '.webp'
+        return data, '.wav'
+    if data[:3] == b'ID3' or data[:2] == b'\xff\xfb':
+        return data, '.mp3'
+
+    for k in range(1, 256):
+        head = bytes(b ^ k for b in data[:16])
+        if head[:4] == b'\x89PNG':
+            return bytes(b ^ k for b in data), '.png'
+        if head[:4] == b'OggS':
+            return bytes(b ^ k for b in data), '.ogg'
+        if head[:4] == b'RIFF':
+            if head[8:12] == b'WEBP':
+                return bytes(b ^ k for b in data), '.webp'
+            return bytes(b ^ k for b in data), '.wav'
+        if head[:3] == b'ID3' or head[:2] == b'\xff\xfb':
+            return bytes(b ^ k for b in data), '.mp3'
+    return data, None
+
+
+
 
 def kiri_extract_unified(game_dir, out_root, log, progress, out_name='提取资源'):
     """通用 KiriKiri 提取器（自动兼容柚子社/ATRI 等结构）：
@@ -365,6 +415,12 @@ def kiri_extract_unified(game_dir, out_root, log, progress, out_name='提取资�
     """
     if not XP3_OK:
         log('[错误] XP3 解包库加载失败，请检查 xp3lib 目录是否完整。')
+        return
+
+    # Steam 版 xp3（文件名哈希 + XOR 数据加密）：数据层尚未完整逆向，明确提示避免空跑
+    if _is_steam_xp3(game_dir):
+        log('[提示] 检测到 Steam 加密版 xp3（文件名哈希 + 数据加密）。')
+        log('[提示] 当前版本仅能读取索引，数据加密层尚未完整支持，暂无法解包。')
         return
 
     out_dir = os.path.join(out_root, out_name)
@@ -617,6 +673,93 @@ def kiri_extract_unified(game_dir, out_root, log, progress, out_name='提取资�
     for arch in xp3_files:
         if arch not in handled:
             process_archive_by_content(arch)
+
+
+def kiri_extract_steam(game_dir, out_root, log, progress, out_name='提取资源'):
+    """Steam 版 xp3 专用提取：文件名是哈希，数据用单字节 XOR 加密，按档案名粗分类。"""
+    if not XP3_OK:
+        log('[错误] XP3 解包库加载失败，请检查 xp3lib 目录是否完整。')
+        return
+
+    out_dir = os.path.join(out_root, out_name)
+    ensure_dir(out_dir)
+    for sub in OUT_SUBDIRS:
+        ensure_dir(os.path.join(out_dir, sub))
+
+    log(f'[KiriKiri-Steam] 游戏目录：{game_dir}')
+    log(f'[KiriKiri-Steam] 输出目录：{out_dir}')
+
+    def save_image(data, dest_dir, name):
+        import io
+        from PIL import Image
+        try:
+            img = Image.open(io.BytesIO(data))
+            if img.mode in ('RGB', 'RGBA', 'L', 'P'):
+                img = img.convert('RGBA')
+            ensure_dir(dest_dir)
+            path = os.path.join(dest_dir, name + '.png')
+            if exists_nonempty(path):
+                return False
+            img.save(path, 'PNG')
+            return True
+        except Exception:
+            return False
+
+    def process_archive(arch, label, allow_audio, allow_image, image_dir):
+        path = os.path.join(game_dir, arch)
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, 'rb') as f:
+                reader = XP3Reader(f, True)
+                entries = list(reader.file_index.entries)
+                total = len(entries)
+                progress(label, 0, total, '准备读取')
+                done = skipped = 0
+                for entry in entries:
+                    try:
+                        xf = XP3File(entry, f, True, True)
+                        raw = xf.read('yuzu')
+                    except Exception as exc:
+                        log(f'[读取失败] {label} {entry.file_path!r}: {exc!r}')
+                        skipped += 1
+                        progress(label, done + skipped, total, f'成功 {done}，跳过 {skipped}')
+                        continue
+                    data, ext = _steam_decrypt(raw)
+                    if ext is None:
+                        skipped += 1
+                        progress(label, done + skipped, total, f'成功 {done}，跳过 {skipped}')
+                        continue
+                    name = entry.file_path
+                    ok = False
+                    if ext in ('.png', '.webp', '.tlg') and allow_image:
+                        ok = save_image(data, os.path.join(out_dir, image_dir), name)
+                    elif ext in ('.ogg', '.opus', '.wav', '.mp3') and allow_audio:
+                        ok = _write_file(os.path.join(out_dir, 'BGM', name + ext), data)
+                    if ok:
+                        done += 1
+                    else:
+                        skipped += 1
+                    progress(label, done + skipped, total, f'成功 {done}，跳过 {skipped}')
+        except Exception as exc:
+            log(f'[错误] {arch}: {exc!r}')
+            return
+        log(f'[完成] {label} 处理 {done} 个，跳过 {skipped} 个，共 {total} 个')
+
+    for _n in sorted(os.listdir(game_dir)):
+        _al = _n.lower()
+        if _al.startswith('bgimage'):
+            process_archive(_n, '背景', allow_audio=False, allow_image=True, image_dir='背景')
+        elif _al.startswith('fgimage'):
+            process_archive(_n, '立绘', allow_audio=False, allow_image=True, image_dir='立绘')
+        elif _al.startswith('evimage'):
+            process_archive(_n, 'CG', allow_audio=False, allow_image=True, image_dir='CG')
+        elif _al.startswith('data'):
+            process_archive(_n, 'BGM', allow_audio=True, allow_image=True, image_dir='CG')
+        elif _al.startswith('vol'):
+            process_archive(_n, 'CG', allow_audio=False, allow_image=True, image_dir='CG')
+        # voice / steam / patch 等不处理
+
 
 
 def kiri_extract(game_dir, out_root, log, progress, out_name='提取资源'):

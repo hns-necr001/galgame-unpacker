@@ -46,7 +46,18 @@ class XP3FileIndex:
         entries = []
         with BytesIO(index) as index_buffer:
             while index_buffer.tell() < len(index):
-                entries.append(XP3FileEntry.read_from(index_buffer))
+                start = index_buffer.tell()
+                try:
+                    entries.append(XP3FileEntry.read_from(index_buffer))
+                except AssertionError:
+                    # Steam variant: hnfn protect block may not be followed by File. Skip it.
+                    index_buffer.seek(start)
+                    name = index_buffer.read(4)
+                    if name == b'hnfn':
+                        size, = struct.unpack('<Q', index_buffer.read(8))
+                        index_buffer.seek(start + 12 + size)
+                        continue
+                    raise
 
         return cls.from_entries(entries, buffer)
 

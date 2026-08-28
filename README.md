@@ -76,6 +76,39 @@ Unity 解包需要：
 - `fmod_toolkit` 及其 `fmod.dll`（FMOD 音频解码）
 - `archspec/json` 数据文件（astc_encoder 依赖）
 
+## 附带脚本
+
+`scripts/` 目录提供两个解包后的资源处理脚本（源自 [2DIPW/atri_extract_toolbox](https://github.com/2DIPW/atri_extract_toolbox)）：
+
+### batch_convert.py —— 批量转换音频
+
+把解包出来的 `.opus` / `.ogg` 批量转成 `mp3` / `wav` 等（需要 `ffmpeg` 并加入 PATH）：
+
+```bash
+python scripts/batch_convert.py -i <音频目录> -o <输出目录> -f mp3 -t 16
+```
+
+参数：
+- `-i / --input`：输入目录，默认当前目录
+- `-o / --output`：输出目录，默认 `converted`
+- `-f / --format`：目标格式（mp3、wav 等），默认 `mp3`
+- `-t / --thread`：并发线程数，默认 16
+
+### parse_script.py —— 解析剧本 JSON
+
+把 [FreeMote](https://github.com/UlyssesWu/FreeMote) 反编译出来的 `scn` JSON 剧本解析成可读表格（角色 / 日文 / 译文 / 语音）：
+
+```bash
+python scripts/parse_script.py -i <json目录> -o <输出目录> -l 2 -af mp3 -s
+```
+
+参数：
+- `-i / --input`：JSON 文件目录，默认当前目录
+- `-o / --output`：输出目录，默认 `parsed`
+- `-l / --language`：译文语言 `0:JP 1:EN 2:ZHS 3:ZHT`，默认 2（简中）
+- `-af / --audio_format`：语音文件名后缀，默认 `mp3`
+- `-s / --single_file`：合并所有 JSON 输出为一个文件
+
 ## 重新打包
 
 ```bash
