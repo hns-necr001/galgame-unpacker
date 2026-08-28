@@ -355,6 +355,43 @@ def _is_atri_style(game_dir):
             and os.path.exists(os.path.join(game_dir, 'fgimage.xp3'))
             and os.path.exists(os.path.join(game_dir, 'vol1.xp3')))
 
+# 已知 Cx 加密游戏方案（参数来自 GARbro Formats.dat / 逆向）
+_CX_SCHEMES = {
+    # 《天色幻想岛》 AmairoIsleNauts
+    'AmairoIsleNauts': {
+        'tpm': r'plugin\AmairoIsleNauts.tpm',
+        'mask': 548, 'offset': 1442,
+        'prolog_order': [0, 1, 2],
+        'odd_branch_order': [5, 3, 4, 0, 1, 2],
+        'even_branch_order': [4, 2, 3, 5, 7, 6, 1, 0],
+    },
+}
+
+
+def _detect_cx(game_dir):
+    """检测 Cx 加密游戏，返回 (CxEncryption, tpm路径) 或 None。"""
+    try:
+        from cx import CxScheme, CxEncryption, read_control_block
+    except Exception:
+        return None
+    plugin_dir = os.path.join(game_dir, 'plugin')
+    if not os.path.isdir(plugin_dir):
+        return None
+    for name, params in _CX_SCHEMES.items():
+        tpm_rel = params['tpm'].replace('\\', '/')
+        tpm_path = os.path.join(game_dir, *tpm_rel.split('/'))
+        if os.path.exists(tpm_path):
+            cb = read_control_block(tpm_path)
+            scheme = CxScheme(
+                mask=params['mask'], offset=params['offset'],
+                prolog_order=params['prolog_order'],
+                odd_branch_order=params['odd_branch_order'],
+                even_branch_order=params['even_branch_order'],
+                control_block=cb, tpm_file_name=params['tpm'])
+            return CxEncryption(scheme), tpm_path
+    return None
+
+
 def _is_steam_xp3(game_dir):
     """检测 Steam 版 xp3：索引能读但条目文件名是 32 位十六进制哈希。"""
     for arch in ('bgimage.xp3', 'data.xp3', 'fgimage.xp3', 'vol1.xp3'):
@@ -424,6 +461,13 @@ def kiri_extract_unified(game_dir, out_root, log, progress, out_name='提取资�
         log('[提示] 请使用其他版本（如标准版/D 盘版），或用 GARbro 等工具自行尝试。')
         return
 
+    # Cx 加密游戏（如《天色幻想岛》）
+    cx_decryptor = None
+    _cx = _detect_cx(game_dir)
+    if _cx is not None:
+        cx_decryptor = _cx[0]
+        log('[提示] 检测到 Cx 加密游戏，使用 Cx 解密器。')
+
     out_dir = os.path.join(out_root, out_name)
     ensure_dir(out_dir)
     for sub in OUT_SUBDIRS:
@@ -472,6 +516,9 @@ def kiri_extract_unified(game_dir, out_root, log, progress, out_name='提取资�
 
             def read_data(entry):
                 xf = XP3File(entry, f, True, True)
+                if cx_decryptor is not None and xf.info.is_encrypted:
+                    raw = xf.read('none')
+                    return cx_decryptor.decrypt(xf.adler32, 0, raw)
                 return xf.read('yuzu')
 
             if parallel:
