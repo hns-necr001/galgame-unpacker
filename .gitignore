@@ -16,3 +16,7 @@ release/
 瑙ｅ寘鏃ュ織.txt
 *_test*
 *.bak
+
+# 临时下载的第三方工具（KrkrExtract / CxdecExtractor）
+_krkr_tools/
+

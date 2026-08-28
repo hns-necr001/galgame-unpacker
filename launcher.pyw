@@ -419,8 +419,9 @@ def kiri_extract_unified(game_dir, out_root, log, progress, out_name='提取资�
 
     # Steam 版 xp3（文件名哈希 + XOR 数据加密）：数据层尚未完整逆向，明确提示避免空跑
     if _is_steam_xp3(game_dir):
-        log('[提示] 检测到 Steam 加密版 xp3（文件名哈希 + 数据加密）。')
-        log('[提示] 当前版本仅能读取索引，数据加密层尚未完整支持，暂无法解包。')
+        log('[提示] 检测到 Steam 加密版 ATRI（文件名哈希 + 数据加密）。')
+        log('[提示] Steam 版 ATRI 加密暂未破解，暂时放弃解包。')
+        log('[提示] 请使用其他版本（如标准版/D 盘版），或用 GARbro 等工具自行尝试。')
         return
 
     out_dir = os.path.join(out_root, out_name)
