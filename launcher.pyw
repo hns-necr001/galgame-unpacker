@@ -11,13 +11,18 @@ import os
 import re
 import sys
 import glob
+import json
 import queue
 import shutil
+import hashlib
+import zipfile
 import tempfile
 import threading
 import subprocess
 import traceback
 import time
+import urllib.request
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
 # ---------- 路径 ----------
@@ -34,6 +39,34 @@ EMTCONVERT = os.path.join(TOOLS_FREEMOTE, 'EmtConvert.exe')
 TLG2PNG = os.path.join(TOOLS_TLG2PNG, 'tlg2png.exe')
 LOG_PATH = os.path.join(TOOL_DIR, '解包日志.txt')
 _LOG_LOCK = threading.Lock()
+
+# ---------- 更新 / 设置 ----------
+APP_VERSION = 'v0.1.2'                    # 当前版本号（与 GitHub Release 的 tag 对比）
+UPDATE_REPO = 'hns-necr001/galgame-unpacker'  # 默认更新源（GitHub 仓库 owner/repo）
+CONFIG_DIR = os.path.join(os.environ.get('APPDATA', TOOL_DIR), 'Galgame解包工具')
+CONFIG_PATH = os.path.join(CONFIG_DIR, 'settings.json')
+
+
+def version_key(v):
+    """把版本字符串转为可比较的元组，如 'v0.1.10' -> (0,1,10)。"""
+    return tuple(int(x) for x in re.findall(r'\d+', str(v)))
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_config(cfg):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
 
 OUT_SUBDIRS = ('BGM', 'CG', '背景', '立绘')
 
@@ -118,10 +151,24 @@ def _extract_archive(archive_path, dest_dir):
     ensure_dir(dest_dir)
     if ext == '.zip':
         import zipfile
+
+        def _fix_zip_name(name):
+            """修复 GBK 编码的中文 zip 文件名乱码。"""
+            try:
+                name.encode('cp437')
+            except UnicodeEncodeError:
+                return name  # 已是 Unicode/UTF-8
+            try:
+                fixed = name.encode('cp437').decode('gbk')
+            except Exception:
+                return name
+            return fixed if fixed != name else name
+
         with zipfile.ZipFile(archive_path, 'r') as z:
             base = os.path.abspath(dest_dir)
             for member in z.infolist():
-                target = os.path.abspath(os.path.join(dest_dir, member.filename))
+                fname = _fix_zip_name(member.filename)
+                target = os.path.abspath(os.path.join(dest_dir, fname))
                 if not target.startswith(base + os.sep):
                     continue  # 防 zip 路径穿越
                 if member.is_dir():
@@ -369,14 +416,25 @@ _CX_SCHEMES = {
 
 
 def _detect_cx(game_dir):
-    """检测 Cx 加密游戏，返回 (CxEncryption, tpm路径) 或 None。"""
+    """检测 Cx 加密游戏，返回 (CxEncryption, tpm路径) 或 None。
+    优先从 schemes.json 加载全部 CxEncryption 方案，按 TPM 文件匹配。"""
     try:
         from cx import CxScheme, CxEncryption, read_control_block
+        import json
     except Exception:
         return None
     plugin_dir = os.path.join(game_dir, 'plugin')
     if not os.path.isdir(plugin_dir):
         return None
+
+    schemes_path = os.path.join(XP3LIB, 'schemes.json')
+    try:
+        with open(schemes_path, encoding='utf-8') as f:
+            all_schemes = json.load(f)
+    except Exception:
+        all_schemes = {}
+
+    # 先试硬编码的 Amairo（保底）
     for name, params in _CX_SCHEMES.items():
         tpm_rel = params['tpm'].replace('\\', '/')
         tpm_path = os.path.join(game_dir, *tpm_rel.split('/'))
@@ -388,6 +446,29 @@ def _detect_cx(game_dir):
                 odd_branch_order=params['odd_branch_order'],
                 even_branch_order=params['even_branch_order'],
                 control_block=cb, tpm_file_name=params['tpm'])
+            return CxEncryption(scheme), tpm_path
+
+    # 遍历 schemes.json 中所有 CxEncryption 方案
+    for name, s in all_schemes.items():
+        if s.get('type') != 'CxEncryption':
+            continue
+        fields = s.get('fields', {})
+        tpm_rel = fields.get('TpmFileName')
+        if not tpm_rel:
+            continue
+        tpm_path = os.path.join(game_dir, *tpm_rel.replace('\\', '/').split('/'))
+        if os.path.exists(tpm_path):
+            try:
+                cb = read_control_block(tpm_path)
+            except Exception:
+                continue
+            scheme = CxScheme(
+                mask=int(fields.get('m_mask', 0) or 0),
+                offset=int(fields.get('m_offset', 0) or 0),
+                prolog_order=fields.get('PrologOrder') or [0, 1, 2],
+                odd_branch_order=fields.get('OddBranchOrder') or [5, 3, 4, 0, 1, 2],
+                even_branch_order=fields.get('EvenBranchOrder') or [4, 2, 3, 5, 7, 6, 1, 0],
+                control_block=cb, tpm_file_name=tpm_rel)
             return CxEncryption(scheme), tpm_path
     return None
 
@@ -1100,12 +1181,15 @@ class App:
         self._prog_last = None
         self.stop_requested = False
 
+        topbar = tk.Frame(root)
+        topbar.pack(fill='x', padx=10, pady=(10, 0))
         info = tk.Label(
-            root,
+            topbar,
             text='支持引擎：Unity / KiriKiri\n'
                  '输出：所选输出目录下自动生成自定义文件夹，内含 BGM / CG / 背景 / 立绘 四个子文件夹',
             fg='#555555', anchor='w', justify='left')
-        info.pack(fill='x', padx=10, pady=(10, 0))
+        info.pack(side='left', fill='x', expand=True)
+        tk.Button(topbar, text='设置', width=8, command=self.open_settings).pack(side='right', padx=(8, 0))
 
         arcrow = tk.Frame(root)
         arcrow.pack(fill='x', padx=10, pady=5)
@@ -1141,6 +1225,7 @@ class App:
         btnrow.pack(pady=5)
         tk.Button(btnrow, text='开始解包', command=self.start).pack(side='left', padx=5)
         tk.Button(btnrow, text='停止解包', command=self.stop).pack(side='left', padx=5)
+        tk.Button(btnrow, text='算法状态', command=self.show_crypto_status).pack(side='left', padx=5)
 
         self.log_box = scrolledtext.ScrolledText(root, height=16, state='disabled')
         self.log_box.pack(fill='both', expand=True, padx=10, pady=(0, 10))
@@ -1149,6 +1234,11 @@ class App:
         self.worker = None
         self.archive_worker = None
         root.after(100, self.poll_queue)
+
+        # 启动时自动检查更新（设置里可开关）
+        cfg = load_config()
+        if cfg.get('auto_check'):
+            root.after(2000, self._auto_check_startup)
 
     def choose_archive(self):
         path = filedialog.askopenfilename(
@@ -1250,6 +1340,339 @@ class App:
             self.status_var.set('正在停止...')
         else:
             messagebox.showinfo('提示', '当前没有正在运行的解包任务')
+
+    def show_crypto_status(self):
+        """弹窗展示加密算法移植状态：已测试 / 已实现未测试 / 未实现，并列出具体游戏。"""
+        import json
+        from collections import Counter, defaultdict
+        try:
+            from krkr_crypt import IMPLEMENTED
+        except Exception as exc:
+            messagebox.showerror('错误', f'krkr_crypt 模块加载失败：{exc!r}')
+            return
+        schemes_path = os.path.join(XP3LIB, 'schemes.json')
+        try:
+            with open(schemes_path, encoding='utf-8') as f:
+                schemes = json.load(f)
+        except Exception as exc:
+            messagebox.showerror('错误', f'schemes.json 加载失败：{exc!r}')
+            return
+        types = Counter(v.get('type') for v in schemes.values())
+        tested = {'CxEncryption'}  # 已实测过（天色幻想岛）
+        implemented = set(IMPLEMENTED) | tested
+
+        win = tk.Toplevel(self.root)
+        win.title('加密算法状态')
+        win.geometry('620x560')
+
+        nb = ttk.Notebook(win)
+        nb.pack(fill='both', expand=True, padx=10, pady=10)
+
+        # ---- 页 1：算法状态总览 ----
+        page1 = tk.Frame(nb)
+        nb.add(page1, text='算法状态')
+        txt = scrolledtext.ScrolledText(page1, width=76, height=32, state='normal')
+        txt.pack(fill='both', expand=True, padx=4, pady=4)
+
+        txt.insert('end', '========== 测试了的和没测试了的 ==========\n\n')
+
+        txt.insert('end', '【已测试】\n')
+        for t in sorted(tested):
+            txt.insert('end', f'  ✓ {t}（{types.get(t, 0)} 个游戏）\n')
+        if not tested:
+            txt.insert('end', '  （无）\n')
+
+        txt.insert('end', '\n【已实现 · 未测试】\n')
+        for t in sorted(implemented - tested):
+            txt.insert('end', f'  · {t}（{types.get(t, 0)} 个游戏）\n')
+
+        txt.insert('end', '\n【未实现】\n')
+        for t in sorted(set(types) - implemented):
+            txt.insert('end', f'  ✗ {t}（{types.get(t, 0)} 个游戏）\n')
+
+        txt.configure(state='disabled')
+
+        # ---- 页 2：具体游戏清单（按算法分组）----
+        page2 = tk.Frame(nb)
+        nb.add(page2, text='具体游戏清单')
+        txt2 = scrolledtext.ScrolledText(page2, width=76, height=32, state='normal')
+        txt2.pack(fill='both', expand=True, padx=4, pady=4)
+
+        by_type = defaultdict(list)
+        for name, s in schemes.items():
+            by_type[s.get('type')].append(name)
+
+        txt2.insert('end', '========== 各算法对应的具体游戏 ==========\n\n')
+
+        def write_group(title, types_sorted, marker):
+            txt2.insert('end', f'\n{title}\n')
+            for t in types_sorted:
+                games = sorted(by_type.get(t, []))
+                txt2.insert('end', f'  {marker} {t}（{len(games)} 个游戏）\n')
+                for g in games:
+                    txt2.insert('end', f'      - {g}\n')
+
+        write_group('【已测试】', sorted(tested), '✓')
+        write_group('【已实现 · 未测试】', sorted(implemented - tested), '·')
+        write_group('【未实现】', sorted(set(types) - implemented), '✗')
+
+        txt2.configure(state='disabled')
+
+    # ---------- 设置 / 检测更新 ----------
+
+    def open_settings(self):
+        """右上角【设置】窗口：更新源、检查更新、下载安装更新。"""
+        if getattr(self, '_settings_win', None) is not None and self._settings_win.winfo_exists():
+            self._settings_win.lift()
+            return
+        cfg = load_config()
+        win = tk.Toplevel(self.root)
+        self._settings_win = win
+        win.title('设置')
+        win.geometry('560x480')
+        win.transient(self.root)
+
+        row = tk.Frame(win)
+        row.pack(fill='x', padx=12, pady=(14, 4))
+        tk.Label(row, text='当前版本：').pack(side='left')
+        tk.Label(row, text=APP_VERSION, font=('', 10, 'bold'), fg='#0066cc').pack(side='left')
+        tk.Label(row, text='（GitHub Release tag）', fg='#999999').pack(side='left', padx=6)
+
+        row2 = tk.Frame(win)
+        row2.pack(fill='x', padx=12, pady=6)
+        tk.Label(row2, text='更新源：').pack(side='left')
+        self.update_repo_var = tk.StringVar(value=cfg.get('update_repo') or UPDATE_REPO)
+        tk.Entry(row2, textvariable=self.update_repo_var, width=46).pack(
+            side='left', fill='x', expand=True, padx=5)
+
+        row3 = tk.Frame(win)
+        row3.pack(fill='x', padx=12, pady=4)
+        self.auto_check_var = tk.BooleanVar(value=bool(cfg.get('auto_check')))
+        tk.Checkbutton(row3, text='启动时自动检查更新',
+                       variable=self.auto_check_var,
+                       command=self._save_settings).pack(side='left')
+        self.update_status_var = tk.StringVar(value='')
+        tk.Label(row3, textvariable=self.update_status_var, fg='#0066cc',
+                 anchor='e').pack(side='right', fill='x', expand=True)
+
+        btns = tk.Frame(win)
+        btns.pack(fill='x', padx=12, pady=6)
+        tk.Button(btns, text='检查更新', width=12, command=self.check_update).pack(side='left')
+        tk.Button(btns, text='下载并安装更新', width=16,
+                  command=self.download_update).pack(side='left', padx=8)
+
+        logf = tk.Frame(win)
+        logf.pack(fill='both', expand=True, padx=12, pady=(4, 12))
+        self.update_log_box = scrolledtext.ScrolledText(logf, height=11, state='disabled')
+        self.update_log_box.pack(fill='both', expand=True)
+
+        win.protocol('WM_DELETE_WINDOW', lambda: (self._save_settings(), win.destroy()))
+        self._update_log(f'当前版本：{APP_VERSION}；更新源：{self.update_repo_var.get()}')
+        self._update_log('提示：发布新版本时，在 GitHub 仓库创建带 tag 的 Release，'
+                         '把整个 release 目录打成 zip 上传即可被检测到。')
+
+    def _settings_alive(self):
+        return (getattr(self, '_settings_win', None) is not None
+                and self._settings_win.winfo_exists())
+
+    def _save_settings(self):
+        cfg = load_config()
+        cfg['update_repo'] = self.update_repo_var.get().strip() or UPDATE_REPO
+        cfg['auto_check'] = bool(self.auto_check_var.get())
+        save_config(cfg)
+
+    def _update_status(self, msg):
+        if self._settings_alive() and getattr(self, 'update_status_var', None):
+            self.update_status_var.set(msg)
+
+    def _update_log(self, msg):
+        if self._settings_alive() and getattr(self, 'update_log_box', None):
+            self.update_log_box.configure(state='normal')
+            self.update_log_box.insert('end', msg + '\n')
+            self.update_log_box.see('end')
+            self.update_log_box.configure(state='disabled')
+
+    def _normalize_repo(self, s):
+        """把 'https://github.com/a/b.git' 或 'a/b' 归一化为 owner/repo。"""
+        s = (s or '').strip().rstrip('/')
+        s = re.sub(r'^https?://(www\.)?github\.com/', '', s)
+        s = re.sub(r'\.git$', '', s)
+        parts = s.split('/')
+        if len(parts) >= 2 and parts[0] and parts[1]:
+            return parts[0] + '/' + parts[1]
+        return None
+
+    def check_update(self):
+        repo = self._normalize_repo(self.update_repo_var.get())
+        if not repo:
+            self._update_status('更新源格式不正确（应为 owner/repo 或 GitHub 网址）')
+            return
+        self._update_status('正在检查更新...')
+        self._update_log(f'[检查] 更新源：{repo}')
+        threading.Thread(target=self._check_worker,
+                         args=(repo, self._on_check_done), daemon=True).start()
+
+    def _check_worker(self, repo, on_done):
+        """后台查询 GitHub 最新 Release；结果在主线程回调 on_done(msg, newer, tag, asset)。"""
+        def finish(msg, newer, tag, asset):
+            self.root.after(0, lambda: on_done(msg, newer, tag, asset))
+        try:
+            url = f'https://api.github.com/repos/{repo}/releases/latest'
+            req = urllib.request.Request(url, headers={
+                'User-Agent': 'galgame-unpacker-updater',
+                'Accept': 'application/vnd.github+json'})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+            tag = data.get('tag_name') or ''
+            if not tag:
+                finish('仓库没有可用的 Release', False, '', None)
+                return
+            asset = next((a for a in data.get('assets', [])
+                          if (a.get('name') or '').endswith('.zip')), None)
+            newer = version_key(tag) > version_key(APP_VERSION)
+            if newer:
+                size_mb = (asset.get('size') or 0) // 1024 // 1024 if asset else 0
+                msg = f'发现新版本 {tag}（当前 {APP_VERSION}）'
+                if asset:
+                    msg += f'\n更新包：{asset["name"]}（约 {size_mb} MB）'
+            else:
+                msg = f'已是最新版本 {APP_VERSION}'
+            self._last_update = {'tag': tag, 'asset': asset, 'newer': newer}
+            finish(msg, newer, tag, asset)
+        except urllib.error.HTTPError as e:
+            finish(f'检查失败：HTTP {e.code}（仓库不存在或没有 Release）', False, '', None)
+        except Exception as exc:
+            finish(f'检查失败：{exc!r}', False, '', None)
+
+    def _on_check_done(self, msg, newer, tag, asset):
+        self._update_status('')
+        self._update_log(f'[结果] {msg}')
+        parent = self._settings_win if self._settings_alive() else self.root
+        if newer:
+            messagebox.showinfo('发现新版本', msg + '\n\n点击“下载并安装更新”开始更新。', parent=parent)
+        else:
+            messagebox.showinfo('检查更新', msg, parent=parent)
+
+    def download_update(self):
+        info = getattr(self, '_last_update', None)
+        if not info:
+            self._update_status('请先点击“检查更新”')
+            return
+        if not info.get('newer'):
+            self._update_status('当前已是最新版本，无需更新')
+            return
+        asset = info.get('asset')
+        if not asset:
+            self._update_status('Release 中没有 zip 更新包')
+            return
+        self._update_status('正在下载更新包...')
+        self._update_log(f'[下载] 开始：{asset["name"]}')
+        threading.Thread(target=self._download_worker, args=(asset,), daemon=True).start()
+
+    def _download_worker(self, asset):
+        try:
+            url = asset['browser_download_url']
+            req = urllib.request.Request(url, headers={
+                'User-Agent': 'galgame-unpacker-updater'})
+            tmpdir = tempfile.mkdtemp(prefix='galgame_upd_')
+            zip_path = os.path.join(tmpdir, asset.get('name') or 'update.zip')
+            with urllib.request.urlopen(req, timeout=120) as resp, open(zip_path, 'wb') as f:
+                total = int(resp.headers.get('Content-Length') or 0)
+                done = 0
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    if total:
+                        pct = min(100, done * 100 // total)
+                        self.root.after(0, lambda p=pct: self._update_status(f'下载中… {p}%'))
+            self.root.after(0, lambda: self._update_status('下载完成，校验中...'))
+            digest = asset.get('digest') or ''
+            if digest and ':' in digest:
+                expect = digest.rsplit(':', 1)[-1].lower()
+                h = hashlib.sha256()
+                with open(zip_path, 'rb') as f:
+                    for chunk in iter(lambda: f.read(65536), b''):
+                        h.update(chunk)
+                if h.hexdigest() != expect:
+                    self.root.after(0, lambda: self._update_status('SHA256 校验失败，更新包可能损坏'))
+                    self.root.after(0, lambda: self._update_log('[失败] SHA256 校验不一致，已中止'))
+                    return
+                self.root.after(0, lambda: self._update_log('[校验] SHA256 一致'))
+            self.root.after(0, lambda: self._update_log(
+                f'[下载] 完成：{os.path.basename(zip_path)}（{done} 字节）'))
+            self._apply_update(zip_path, tmpdir)
+        except Exception as exc:
+            self.root.after(0, lambda: self._update_status(f'下载失败：{exc!r}'))
+            self.root.after(0, lambda: self._update_log(f'[失败] {exc!r}'))
+
+    def _apply_update(self, zip_path, tmpdir):
+        """解压更新包、写替换脚本、提示退出（exe 运行中无法自我覆盖）。"""
+        try:
+            new_root = os.path.join(tmpdir, 'new')
+            os.makedirs(new_root, exist_ok=True)
+            with zipfile.ZipFile(zip_path) as z:
+                z.extractall(new_root)
+            exe_name = (os.path.basename(sys.executable) if getattr(sys, 'frozen', False)
+                        else 'Galgame解包工具.exe')
+            content = None
+            for dirpath, _dirs, files in os.walk(new_root):
+                if exe_name in files:
+                    content = dirpath
+                    break
+            if content is None:
+                self.root.after(0, lambda: self._update_status('更新包内未找到主程序，已中止'))
+                self.root.after(0, lambda: self._update_log('[失败] 更新包结构不符合预期'))
+                return
+            pid = os.getpid()
+            bat = os.path.join(tmpdir, 'update.bat')
+            tooldir = TOOL_DIR
+            exe_path = os.path.join(tooldir, exe_name)
+            lines = [
+                '@echo off',
+                'chcp 65001 >nul',
+                ':wait',
+                f'tasklist /FI "PID eq {pid}" | findstr /I "PID" >nul',
+                'if not errorlevel 1 (',
+                '  timeout /t 1 /nobreak >nul',
+                '  goto wait',
+                ')',
+                f'xcopy /E /Y /Q "{content}\\*" "{tooldir}\\" >nul',
+                'rmdir /S /Q "%~dp0new" >nul 2>&1',
+                'del "%~dp0update.zip" >nul 2>&1',
+                f'start "" "{exe_path}"',
+                '(goto) 2>nul & del "%~f0"',
+            ]
+            with open(bat, 'w', encoding='gbk', errors='replace') as f:
+                f.write('\r\n'.join(lines))
+            subprocess.Popen(['cmd', '/c', bat],
+                             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                             close_fds=True)
+            self.root.after(0, lambda: self._update_status('替换脚本已就绪，即将重启完成更新'))
+            self.root.after(0, lambda: self._update_log('[更新] 解压完成，等待退出替换...'))
+            self.root.after(600, self._quit_for_update)
+        except Exception as exc:
+            self.root.after(0, lambda: self._update_status(f'准备更新失败：{exc!r}'))
+            self.root.after(0, lambda: self._update_log(f'[失败] {exc!r}'))
+
+    def _quit_for_update(self):
+        try:
+            messagebox.showinfo('更新', '文件已就绪，程序将退出并自动完成替换，随后自动重新启动。',
+                                parent=self.root)
+        finally:
+            self.root.destroy()
+
+    def _auto_check_startup(self):
+        repo = self._normalize_repo(load_config().get('update_repo') or UPDATE_REPO)
+        if repo:
+            threading.Thread(target=self._check_worker,
+                             args=(repo, self._on_auto_check), daemon=True).start()
+
+    def _on_auto_check(self, msg, newer, tag, asset):
+        if newer:
+            messagebox.showinfo('发现新版本', msg + '\n\n可在右上角“设置”中查看并更新。')
 
     def start(self):
         path = self.path_var.get().strip()
