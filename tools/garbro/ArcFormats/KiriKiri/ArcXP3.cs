@@ -392,7 +392,7 @@ NextEntry:
             var alg = GuessCryptAlgorithm (file);
             if (null != alg)
                 return alg;
-            // 控制台/自动化模式:遍历所有已知方案,用 adler32 校验自动选择
+            // 控制台/自动化模式:遍历所有已知方案,用 adler32/文件头投票自动选择
             alg = TryAllSchemes (file);
             if (null != alg)
                 return alg;
@@ -400,14 +400,16 @@ NextEntry:
             return options.Scheme;
         }
 
-        // 遍历 KnownSchemes,试解第一个加密条目,adler32 校验通过即命中
+        // 遍历 KnownSchemes,试解多个加密条目投票,命中>=2 才确认
+        static int TryAllSchemeLogCount = 0;
         static ICrypt TryAllSchemes (ArcView file)
         {
+            TryAllSchemeLogCount = 0;
             foreach (var kv in KnownSchemes)
             {
                 try
                 {
-                    if (VerifyXp3Scheme (file, kv.Value))
+                    if (VerifyXp3Scheme (file, kv.Value) >= 2)
                         return kv.Value;
                 }
                 catch { }
@@ -415,59 +417,87 @@ NextEntry:
             return null;
         }
 
-        static bool VerifyXp3Scheme (ArcView file, ICrypt scheme)
+        static bool LooksLikeContent (byte[] data, int len)
+        {
+            if (len > 4)
+            {
+                // PNG:第 2-4 字节为 "PNG" 即命中(兼容 YuzuSoft 第一字节伪装)
+                if (0x50 == data[1] && 0x4E == data[2] && 0x47 == data[3]) return true;
+                if ('O' == data[0] && 'g' == data[1] && 'g' == data[2] && 'S' == data[3]) return true;    // Ogg
+                if ('R' == data[0] && 'I' == data[1] && 'F' == data[2] && 'F' == data[3]) return true;    // RIFF
+                if ('\xFF' == data[0] && '\xD8' == data[1] && '\xFF' == data[2]) return true;             // JPEG
+            }
+            return false;
+        }
+
+        static int VerifyXp3Scheme (ArcView file, ICrypt scheme)
         {
             const long base_offset = 0;
             if (file.MaxOffset < 0x20)
-                return false;
+                return 0;
             long dir_offset = base_offset + file.View.ReadInt64 (base_offset + 0x0b);
             if (dir_offset < 0x13 || dir_offset >= file.MaxOffset)
-                return false;
+                return 0;
             if (0x80 == file.View.ReadUInt32 (dir_offset))
             {
                 dir_offset = base_offset + file.View.ReadInt64 (dir_offset + 9);
                 if (dir_offset < 0x13 || dir_offset >= file.MaxOffset)
-                    return false;
+                    return 0;
             }
             int header_type = file.View.ReadByte (dir_offset);
             if (0 != header_type && 1 != header_type)
-                return false;
+                return 0;
             Stream header_stream;
             if (0 == header_type)
             {
                 long header_size = file.View.ReadInt64 (dir_offset + 1);
                 if (header_size > uint.MaxValue)
-                    return false;
+                    return 0;
                 header_stream = file.CreateStream (dir_offset + 9, (uint)header_size);
             }
             else
             {
                 long packed_size = file.View.ReadInt64 (dir_offset + 1);
                 if (packed_size > uint.MaxValue)
-                    return false;
+                    return 0;
                 long header_size = file.View.ReadInt64 (dir_offset + 9);
                 using (var input = file.CreateStream (dir_offset + 17, (uint)packed_size))
                     header_stream = ZLibCompressor.DeCompress (input);
             }
+            int hits = 0;
+            int tried = 0;
             using (var header = new BinaryReader (header_stream, Encoding.Unicode))
             {
                 long dpos = 0;
-                while (-1 != header.PeekChar())
+                uint entry_expect = 0;
+                while (-1 != header.PeekChar() && tried < 16)
                 {
                     uint entry_signature = header.ReadUInt32();
                     long entry_size = header.ReadInt64();
                     if (entry_size < 0)
-                        return false;
+                        return hits;
                     dpos += 12 + entry_size;
+                    if (0x46696C65 == entry_signature) // "eliF" 加密 chunk(含 adler32)
+                    {
+                        if (entry_size >= 4)
+                        {
+                            long saved = header.BaseStream.Position;
+                            entry_expect = header.ReadUInt32();
+                            header.BaseStream.Position = saved;
+                        }
+                        header.BaseStream.Position = dpos;
+                        continue;
+                    }
                     if (0x656C6946 != entry_signature)
                     {
                         header.BaseStream.Position = dpos;
                         continue;
                     }
                     bool is_encrypted = false;
-                    uint expect_adler = 0;
+                    uint expect_adler = entry_expect;
                     long seg_offset = -1, seg_size = 0, seg_usize = 0;
                     bool seg_compressed = false;
+                    int seg_count = 0;
                     long remaining = entry_size;
                     while (remaining > 0)
                     {
@@ -486,14 +516,15 @@ NextEntry:
                         {
                             is_encrypted = 0 != header.ReadUInt32();
                         }
-                        else if (0x61646c72 == section) // "adlr"
+                        else if (0x726c6461 == section) // "adlr"
                         {
-                            expect_adler = header.ReadUInt32();
+                            if (4 == section_size)
+                                expect_adler = header.ReadUInt32();
                         }
                         else if (0x6d676573 == section) // "segm"
                         {
-                            int count = (int)(section_size / 0x1c);
-                            for (int i = 0; i < count; ++i)
+                            seg_count = (int)(section_size / 0x1c);
+                            for (int i = 0; i < seg_count; ++i)
                             {
                                 bool compressed = 0 != header.ReadInt32();
                                 long so = base_offset + header.ReadInt64();
@@ -507,8 +538,10 @@ NextEntry:
                         }
                         header.BaseStream.Position = next;
                     }
-                    if (is_encrypted && seg_offset >= 0 && seg_size > 0 && seg_size < 0x40000000)
+                    // 只校验单 segment 的加密条目(多 segment 的 adler 需整条拼接,跳过避免误判)
+                    if (is_encrypted && seg_count == 1 && seg_offset >= 0 && seg_size > 0 && seg_size < 0x40000000)
                     {
+                        ++tried;
                         byte[] data = new byte[seg_size];
                         using (var s = file.CreateStream (seg_offset, (uint)seg_size))
                         {
@@ -535,22 +568,24 @@ NextEntry:
                         var fake = new Xp3Entry { Hash = expect_adler };
                         scheme.Decrypt (fake, seg_offset, data, 0, data.Length);
                         uint adler_dec = Adler32 (data);
-                        bool ok = scheme.HashAfterCrypt
-                            ? expect_adler == adler_raw
-                            : expect_adler == adler_dec;
-                        if (!ok && data.Length > 4)
+                        bool hit = false;
+                        if (scheme.HashAfterCrypt ? expect_adler == adler_raw : expect_adler == adler_dec)
+                            hit = true;
+                        if (LooksLikeContent (data, data.Length))
+                            hit = true;
+                        if (hit)
                         {
-                            if (0x89 == data[0] && 0x50 == data[1] && 0x4E == data[2] && 0x47 == data[3]) ok = true; // PNG
-                            if ('O' == data[0] && 'g' == data[1] && 'g' == data[2] && 'S' == data[3]) ok = true;    // Ogg
-                            if ('R' == data[0] && 'I' == data[1] && 'F' == data[2] && 'F' == data[3]) ok = true;    // RIFF
+                            ++hits;
+                            // 需要至少 3 个且占比 >= 1/3,避免碰巧命中
+                            if (hits >= 3 && hits * 3 >= tried)
+                                return hits;
                         }
-                        if (ok)
-                            return true;
                     }
                     header.BaseStream.Position = dpos;
                 }
             }
-            return false;
+            // 比例达标才算(避免乱码碰巧命中)
+            return (hits >= 3 && hits * 3 >= tried) ? hits : 0;
         }
 
         static uint Adler32 (byte[] data)

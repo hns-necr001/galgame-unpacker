@@ -63,6 +63,29 @@ namespace GarbroCli
             return 0;
         }
 
+        // YuzuSoft 伪装:PNG 头第一字节被改,若 data[1:4]=="PNG" 则还原为 0x89
+        static void FixPngHeader(string path)
+        {
+            try
+            {
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite))
+                {
+                    if (fs.Length < 4)
+                        return;
+                    int b0 = fs.ReadByte();
+                    var buf = new byte[3];
+                    if (fs.Read(buf, 0, 3) != 3)
+                        return;
+                    if (b0 != 0x89 && buf[0] == 'P' && buf[1] == 'N' && buf[2] == 'G')
+                    {
+                        fs.Position = 0;
+                        fs.WriteByte(0x89);
+                    }
+                }
+            }
+            catch { }
+        }
+
         static int Extract(string input, string outdir)
         {
             DeserializeGameData();
@@ -110,7 +133,17 @@ namespace GarbroCli
                     arc.ExtractFiles((i, entry, msg) =>
                     {
                         if (entry != null)
+                        {
+                            // YuzuSoft 等会把 PNG 头第一字节伪装:data[1:4]=='PNG' 时还原为 0x89
+                            if (entry.Name.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
+                                || entry.Name.EndsWith(".PNG", StringComparison.Ordinal))
+                            {
+                                string dest = Path.Combine(Directory.GetCurrentDirectory(),
+                                    entry.Name.Replace('/', Path.DirectorySeparatorChar));
+                                FixPngHeader(dest);
+                            }
                             Console.WriteLine("[" + arcName + "] " + entry.Name);
+                        }
                         else if (!string.IsNullOrEmpty(msg))
                             Console.Error.WriteLine(msg);
                         return ArchiveOperation.Continue;
