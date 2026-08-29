@@ -374,3 +374,92 @@ class CxEncryption:
             part = self._decode(key, offset, data[pos:pos + count])
             out.extend(part)
         return bytes(out)
+
+
+# ---------- Cx 变体(YuzuSoft,参考 GARbro YuzCrypt.cs) ----------
+
+class CxProgramNana(CxProgram):
+    """柚子社 Cx 变体使用的随机数发生器(与标准 CxProgram 不同)。"""
+
+    def __init__(self, seed, random_seed, control_block):
+        super().__init__(seed, control_block)
+        self.m_random_seed = _u32(random_seed)
+
+    def get_random(self):
+        s = _u32(self.m_seed ^ (self.m_seed << 17))
+        s ^= _u32((s << 18) | (s >> 15))
+        self.m_seed = _u32(~s)
+        r = _u32(self.m_random_seed ^ (self.m_random_seed << 13))
+        r ^= r >> 17
+        self.m_random_seed = _u32(r ^ (r << 5))
+        return _u32(self.m_seed ^ self.m_random_seed)
+
+
+class SenrenCxCrypt(CxEncryption):
+    """千恋万花等柚子社 Cx:数据层与 CxEncryption 相同(索引文件名字段加密未实现)。"""
+    pass
+
+
+class CabbageCxCrypt(SenrenCxCrypt):
+    """Cabbage Cx:使用 CxProgramNana 随机数。"""
+
+    def __init__(self, scheme, random_seed=0):
+        super().__init__(scheme)
+        self.random_seed = _u32(random_seed)
+
+    def _new_program(self, seed):
+        return CxProgramNana(seed, self.random_seed, self.control_block)
+
+
+class NanaCxCrypt(CabbageCxCrypt):
+    """Nana Cx:数据层与 CabbageCxCrypt 相同(名字列表解密未实现)。"""
+    pass
+
+
+class RiddleCxCrypt(CabbageCxCrypt):
+    """Riddle Joker Cx:Cx 解密前先对前 8 字节额外 XOR。"""
+
+    @staticmethod
+    def _key_from_hash(hash_val):
+        lo = _u32(hash_val ^ 0x55555555)
+        hi = _u32((hash_val << 13) ^ hash_val)
+        hi ^= hi >> 17
+        hi = _u32(hi ^ ((hi << 5) ^ 0xAAAAAAAA))
+        return (hi << 32) | lo
+
+    def decrypt(self, entry_hash, offset, data):
+        out = bytearray(super().decrypt(entry_hash, offset, data))
+        off = offset
+        if off < 8 and len(out) > 0:
+            key = self._key_from_hash(entry_hash)
+            key >>= int(off) << 3
+            first = min(len(out), 8 - int(off))
+            for i in range(first):
+                out[i] ^= key & 0xFF
+                key >>= 8
+        return bytes(out)
+
+
+def build_cx_variant(alg_type, fields):
+    """按 scheme 字段构造 Cx 变体解密器;返回 None 表示非 Cx 类型。"""
+    base = {
+        'CxEncryption': CxEncryption,
+        'SenrenCxCrypt': SenrenCxCrypt,
+        'CabbageCxCrypt': CabbageCxCrypt,
+        'NanaCxCrypt': NanaCxCrypt,
+        'RiddleCxCrypt': RiddleCxCrypt,
+    }
+    cls = base.get(alg_type)
+    if cls is None:
+        return None
+    scheme = CxScheme(
+        mask=int(fields.get('m_mask', 0) or 0),
+        offset=int(fields.get('m_offset', 0) or 0),
+        prolog_order=fields.get('PrologOrder') or [0, 1, 2],
+        odd_branch_order=fields.get('OddBranchOrder') or [5, 3, 4, 0, 1, 2],
+        even_branch_order=fields.get('EvenBranchOrder') or [4, 2, 3, 5, 7, 6, 1, 0],
+        control_block=fields.get('ControlBlock'),
+        tpm_file_name=fields.get('TpmFileName'))
+    if alg_type in ('CxEncryption', 'SenrenCxCrypt'):
+        return cls(scheme)
+    return cls(scheme, fields.get('m_random_seed', 0) or 0)

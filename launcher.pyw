@@ -415,11 +415,38 @@ _CX_SCHEMES = {
 }
 
 
-def _detect_cx(game_dir):
-    """检测 Cx 加密游戏，返回 (CxEncryption, tpm路径) 或 None。
-    优先从 schemes.json 加载全部 CxEncryption 方案，按 TPM 文件匹配。"""
+# Cx 加密系类型(含柚子社变体)
+_CX_TYPES = {'CxEncryption', 'SenrenCxCrypt', 'CabbageCxCrypt', 'NanaCxCrypt', 'RiddleCxCrypt'}
+
+
+def _verify_cx_decoder(dec, game_dir):
+    """试解一个 xp3 的加密条目，adler32 匹配才确认方案正确。"""
+    import zlib
     try:
-        from cx import CxScheme, CxEncryption, read_control_block
+        for arch in ('data.xp3', 'scn.xp3', 'bgimage.xp3'):
+            p = os.path.join(game_dir, arch)
+            if not os.path.exists(p):
+                continue
+            with open(p, 'rb') as f:
+                reader = XP3Reader(f, True)
+                for e in reader.file_index.entries:
+                    if not e.info.is_encrypted:
+                        continue
+                    xf = XP3File(e, f, True, True)
+                    raw = xf.read('none')
+                    out = dec.decrypt(xf.adler32, 0, raw)
+                    return zlib.adler32(out) == xf.adler32
+    except Exception:
+        return False
+    return False
+
+
+def _detect_cx(game_dir):
+    """检测 Cx 加密游戏，返回 (解密器, tpm路径) 或 None。
+    优先从 schemes.json 加载全部 Cx 系方案：带 ControlBlock 的直接用（并试解验证），
+    否则按 TPM 文件匹配。"""
+    try:
+        from cx import CxScheme, CxEncryption, read_control_block, build_cx_variant
         import json
     except Exception:
         return None
@@ -446,13 +473,24 @@ def _detect_cx(game_dir):
                 odd_branch_order=params['odd_branch_order'],
                 even_branch_order=params['even_branch_order'],
                 control_block=cb, tpm_file_name=params['tpm'])
-            return CxEncryption(scheme), tpm_path
+            dec = CxEncryption(scheme)
+            if _verify_cx_decoder(dec, game_dir):
+                return dec, tpm_path
 
-    # 遍历 schemes.json 中所有 CxEncryption 方案
+    # 遍历 schemes.json 中所有 Cx 系方案
     for name, s in all_schemes.items():
-        if s.get('type') != 'CxEncryption':
+        if s.get('type') not in _CX_TYPES:
             continue
         fields = s.get('fields', {})
+        # 带 ControlBlock 的方案可直接构造(不需 TPM)，用试解验证
+        if fields.get('ControlBlock'):
+            try:
+                dec = build_cx_variant(s['type'], fields)
+                if dec is not None and _verify_cx_decoder(dec, game_dir):
+                    return dec, None
+            except Exception:
+                continue
+        # 否则按 TPM 匹配
         tpm_rel = fields.get('TpmFileName')
         if not tpm_rel:
             continue
@@ -469,7 +507,9 @@ def _detect_cx(game_dir):
                 odd_branch_order=fields.get('OddBranchOrder') or [5, 3, 4, 0, 1, 2],
                 even_branch_order=fields.get('EvenBranchOrder') or [4, 2, 3, 5, 7, 6, 1, 0],
                 control_block=cb, tpm_file_name=tpm_rel)
-            return CxEncryption(scheme), tpm_path
+            cls = build_cx_variant(s['type'], {**fields, 'ControlBlock': cb})
+            if cls is not None and _verify_cx_decoder(cls, game_dir):
+                return cls, tpm_path
     return None
 
 
@@ -549,6 +589,25 @@ def kiri_extract_unified(game_dir, out_root, log, progress, out_name='提取资�
         cx_decryptor = _cx[0]
         log('[提示] 检测到 Cx 加密游戏，使用 Cx 解密器。')
 
+    # 其他已知算法（从 schemes.json 按目录名模糊匹配）
+    scheme_decoder = None
+    try:
+        from krkr_crypt import KrkrCrypto
+        _crypto = KrkrCrypto(os.path.join(XP3LIB, 'schemes.json'))
+        _clean = re.sub(r'[^a-z0-9]', '', os.path.basename(game_dir.rstrip('\\/')).lower())
+        for _gname, _sch in _crypto.schemes.items():
+            _gt = _sch.get('type')
+            if _gt in _CX_TYPES or _gt == 'YuzuCrypt':
+                continue
+            _gc = re.sub(r'[^a-z0-9]', '', _gname.lower())
+            if _gc and (_gc in _clean or _clean in _gc):
+                scheme_decoder = _crypto.get_decoder(_gname)
+                if scheme_decoder is not None:
+                    log(f'[提示] 匹配到方案 {_gname}（{_gt}），使用对应解密器。')
+                    break
+    except Exception:
+        scheme_decoder = None
+
     out_dir = os.path.join(out_root, out_name)
     ensure_dir(out_dir)
     for sub in OUT_SUBDIRS:
@@ -597,9 +656,15 @@ def kiri_extract_unified(game_dir, out_root, log, progress, out_name='提取资�
 
             def read_data(entry):
                 xf = XP3File(entry, f, True, True)
-                if cx_decryptor is not None and xf.info.is_encrypted:
+                if not xf.info.is_encrypted:
+                    return xf.read('none')
+                if cx_decryptor is not None:
                     raw = xf.read('none')
                     return cx_decryptor.decrypt(xf.adler32, 0, raw)
+                if scheme_decoder is not None:
+                    raw = xf.read('none')
+                    off = xf.segm.segments[0].offset if xf.segm.segments else 0
+                    return scheme_decoder.decrypt(xf.adler32, off, raw)
                 return xf.read('yuzu')
 
             if parallel:
