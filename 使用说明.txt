@@ -20,17 +20,14 @@ Galgame 解包工具 使用说明
 怎么使用
 ---------
 1. 双击“release\Galgame解包工具.exe”（release 目录是完整可运行版）。
-2. 选择游戏来源，二选一：
-   - 点【选取压缩包】选游戏压缩包（支持 zip / 7z / rar），会自动解压并填入游戏目录
-   - 点【选择目录】直接选择已解压的游戏根目录
-     - Unity：选择包含 manosaba_Data 和 manosaba.exe 的文件夹
-     - KiriKiri：选择包含 evimage.xp3、fgimage.xp3 等文件的文件夹
+2. 点击【选择目录】选择已解压的游戏根目录：
+   - Unity：选择包含 manosaba_Data 和 manosaba.exe 的文件夹
+   - KiriKiri：选择包含 evimage.xp3、fgimage.xp3 等文件的文件夹
+   （如果拿到的是压缩包，请先用 7-Zip / WinRAR / Bandizip 等工具自行解压）
 3. 点击【选择输出】，选择输出位置（建议选一个空文件夹或专门放提取结果的目录）。
 4. 在【文件夹名】输入框里自定义输出文件夹名（默认“提取资源”）。
 5. 点击【开始解包】。
 6. 等日志显示【全部完成】即可。
-
-注意：7z / rar 解压需要电脑上已安装 7-Zip 或 WinRAR。
 
 输出位置
 ---------

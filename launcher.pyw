@@ -145,79 +145,6 @@ def detect_game_type(directory):
         pass
     return None
 
-def _extract_archive(archive_path, dest_dir):
-    """把压缩包解压到 dest_dir，支持 zip / 7z / rar（7z/rar 依赖系统已装 7-Zip 或 WinRAR）。"""
-    ext = os.path.splitext(archive_path)[1].lower()
-    ensure_dir(dest_dir)
-    if ext == '.zip':
-        import zipfile
-
-        def _fix_zip_name(name):
-            """修复 GBK 编码的中文 zip 文件名乱码。"""
-            try:
-                name.encode('cp437')
-            except UnicodeEncodeError:
-                return name  # 已是 Unicode/UTF-8
-            try:
-                fixed = name.encode('cp437').decode('gbk')
-            except Exception:
-                return name
-            return fixed if fixed != name else name
-
-        with zipfile.ZipFile(archive_path, 'r') as z:
-            base = os.path.abspath(dest_dir)
-            for member in z.infolist():
-                fname = _fix_zip_name(member.filename)
-                target = os.path.abspath(os.path.join(dest_dir, fname))
-                if not target.startswith(base + os.sep):
-                    continue  # 防 zip 路径穿越
-                if member.is_dir():
-                    os.makedirs(target, exist_ok=True)
-                else:
-                    os.makedirs(os.path.dirname(target), exist_ok=True)
-                    with z.open(member) as src, open(target, 'wb') as dst:
-                        shutil.copyfileobj(src, dst)
-    elif ext in ('.7z', '.rar'):
-        tool = None
-        for cand in (r'C:\Program Files\7-Zip\7z.exe',
-                     r'C:\Program Files\WinRAR\WinRAR.exe',
-                     r'C:\Program Files\WinRAR\UnRAR.exe'):
-            if os.path.exists(cand):
-                tool = cand
-                break
-        if not tool:
-            raise RuntimeError('解压 7z/rar 需要安装 7-Zip 或 WinRAR')
-        subprocess.run([tool, 'x', '-y', '-o' + dest_dir, archive_path],
-                       check=True, capture_output=True)
-    else:
-        raise RuntimeError(f'不支持的压缩格式：{ext}')
-
-
-def _find_game_root(extract_dir):
-    """在解压目录里自动找游戏根目录（包含 .xp3 或 manosaba_Data 的目录）。"""
-    candidates = [extract_dir]
-    try:
-        subdirs = [d for d in os.listdir(extract_dir)
-                   if os.path.isdir(os.path.join(extract_dir, d))]
-        if len(subdirs) == 1:
-            candidates.append(os.path.join(extract_dir, subdirs[0]))
-    except Exception:
-        pass
-    for cand in candidates:
-        if detect_game_type(cand) is not None:
-            return cand
-    try:
-        for d in os.listdir(extract_dir):
-            sub = os.path.join(extract_dir, d)
-            if os.path.isdir(sub) and detect_game_type(sub) is not None:
-                return sub
-    except Exception:
-        pass
-    return extract_dir
-
-
-
-
 # ---------- KiriKiri（.xp3） ----------
 def _write_file(dest, data):
     """写入文件，返回 True 表示本次新写入。"""
@@ -1286,7 +1213,6 @@ class App:
 
         self.path_var = tk.StringVar()
         self.out_var = tk.StringVar()
-        self.archive_var = tk.StringVar()
         self.name_var = tk.StringVar(value='提取资源')
         self.status_var = tk.StringVar(value='等待开始...')
         self.progress_var = tk.IntVar(value=0)
@@ -1297,17 +1223,10 @@ class App:
         topbar.pack(fill='x', padx=10, pady=(10, 0))
         info = tk.Label(
             topbar,
-            text='支持引擎：Unity / KiriKiri\n'
-                 '输出：所选输出目录下自动生成自定义文件夹，内含 BGM / CG / 背景 / 立绘 四个子文件夹',
+            text='输出：所选输出目录下自动生成自定义文件夹，内含 BGM / CG / 背景 / 立绘 四个子文件夹',
             fg='#555555', anchor='w', justify='left')
         info.pack(side='left', fill='x', expand=True)
         tk.Button(topbar, text='设置', width=8, command=self.open_settings).pack(side='right', padx=(8, 0))
-
-        arcrow = tk.Frame(root)
-        arcrow.pack(fill='x', padx=10, pady=5)
-        tk.Label(arcrow, text='选取压缩包：').pack(side='left')
-        tk.Entry(arcrow, textvariable=self.archive_var, width=62).pack(side='left', fill='x', expand=True, padx=5)
-        tk.Button(arcrow, text='选取压缩包', command=self.choose_archive).pack(side='left')
 
         top = tk.Frame(root)
         top.pack(fill='x', padx=10, pady=5)
@@ -1344,43 +1263,12 @@ class App:
 
         self.log_queue = queue.Queue()
         self.worker = None
-        self.archive_worker = None
         root.after(100, self.poll_queue)
 
         # 启动时自动检查更新（设置里可开关）
         cfg = load_config()
         if cfg.get('auto_check'):
             root.after(2000, self._auto_check_startup)
-
-    def choose_archive(self):
-        path = filedialog.askopenfilename(
-            title='请选择游戏压缩包',
-            filetypes=[('压缩包', '*.zip *.7z *.rar'), ('所有文件', '*.*')])
-        if not path:
-            return
-        self.archive_var.set(path)
-        if self.archive_worker and self.archive_worker.is_alive():
-            messagebox.showinfo('提示', '正在解压中，请稍候')
-            return
-        self.status_var.set('正在解压压缩包...')
-        self.archive_worker = threading.Thread(
-            target=self.do_extract_archive, args=(path,), daemon=True)
-        self.archive_worker.start()
-
-    def do_extract_archive(self, archive_path):
-        try:
-            dest = tempfile.mkdtemp(prefix='galgame_arc_')
-            self.log('[解压] 开始解压：' + archive_path)
-            _extract_archive(archive_path, dest)
-            game_root = _find_game_root(dest)
-            self.root.after(0, lambda: self.path_var.set(game_root))
-            self.log(f'[解压] 完成，识别到游戏目录：{game_root}')
-            self.log_queue.put(('progress', 0, 1, '解压完成，可开始解包'))
-            self.root.after(0, lambda: messagebox.showinfo(
-                '解压完成', '压缩包已解压，游戏目录已自动填入，点击“开始解包”即可。'))
-        except Exception as exc:
-            self.log(f'[解压失败] {exc!r}')
-            self.log_queue.put(('progress', 0, 1, '解压失败'))
 
     def choose_dir(self):
         path = filedialog.askdirectory(title='请选择游戏目录')
