@@ -68,7 +68,7 @@ def save_config(cfg):
     except OSError:
         pass
 
-OUT_SUBDIRS = ('BGM', 'CG', '背景', '立绘')
+OUT_SUBDIRS = ('BGM', 'CG', '背景', '立绘', '视频')
 
 sys.path.insert(0, XP3LIB)
 try:
@@ -491,6 +491,42 @@ def _steam_decrypt(data):
 
 
 
+# 视频扩展名(用于收拢与识别)
+_VIDEO_EXTS = ('.mp4', '.avi', '.wmv', '.mov', '.mkv', '.m2ts', '.webm',
+               '.flv', '.mpg', '.mpeg', '.ogv', '.dat', '.bik', '.ivf')
+
+
+def _collect_videos(out_dir, log=None):
+    """把输出目录里散落到各文件夹的视频文件收拢到「视频」目录。
+    目标已存在同名文件则不重复(删除来源副本)。"""
+    video_dir = os.path.join(out_dir, '视频')
+    ensure_dir(video_dir)
+    vdir_abs = os.path.abspath(video_dir)
+    # 先收集(避免移动影响遍历)
+    pending = []
+    for root, _dirs, files in os.walk(out_dir):
+        if os.path.abspath(root).startswith(vdir_abs + os.sep) or os.path.abspath(root) == vdir_abs:
+            continue  # 已在视频目录
+        for f in files:
+            if f.lower().endswith(_VIDEO_EXTS):
+                rel = os.path.relpath(root, out_dir)
+                pending.append((os.path.join(root, f), rel))
+    for src, rel in pending:
+        dest_dir = video_dir if rel == '.' else os.path.join(video_dir, rel)
+        ensure_dir(dest_dir)
+        dest = os.path.join(dest_dir, os.path.basename(src))
+        try:
+            if exists_nonempty(dest):
+                # 目标已有同文件,不重复,删来源副本
+                os.remove(src)
+            else:
+                shutil.move(src, dest)
+                if log:
+                    log(f'[视频] 收拢 {os.path.join(rel, os.path.basename(src))}')
+        except OSError:
+            pass
+
+
 def _find_garbro_cli():
     """查找 C# 解包核心(garbro_cli.exe)。"""
     for c in (os.path.join(TOOL_DIR, 'tools', 'garbro_cli', 'garbro_cli.exe'),
@@ -507,7 +543,8 @@ def _extract_with_garbro_cli(cli, game_dir, out_root, out_name, log, progress):
     """用 C# GARbro 核心解包(支持 GARbro 全部格式),按 xp3 类型归档。"""
     out_dir = os.path.join(out_root, out_name)
     ensure_dir(out_dir)
-    targets = {'bgimage': '背景', 'evimage': 'CG', 'fgimage': '立绘', 'bgm': 'BGM'}
+    targets = {'bgimage': '背景', 'evimage': 'CG', 'fgimage': '立绘', 'bgm': 'BGM',
+               'video': '视频'}
     no_window = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     xp3s = sorted(f for f in os.listdir(game_dir) if f.lower().endswith('.xp3'))
     if not xp3s:
@@ -531,6 +568,7 @@ def _extract_with_garbro_cli(cli, game_dir, out_root, out_name, log, progress):
             if tail:
                 log('[C#核心] ' + tail[-1])
         progress('解包', i + 1, len(xp3s), arch)
+    _collect_videos(out_dir, log)
     log('[C#核心] 完成')
 
 
@@ -603,6 +641,10 @@ def kiri_extract_unified(game_dir, out_root, log, progress, out_name='提取资�
 
     def handle_cg(internal, data, out_dir):
         dest = os.path.join(out_dir, 'CG', os.path.basename(internal))
+        return _write_file(dest, data)
+
+    def handle_video(internal, data, out_dir):
+        dest = os.path.join(out_dir, '视频', safe_relpath(internal))
         return _write_file(dest, data)
 
     def process_archive(arch, match, handle, label, parallel=False):
@@ -755,7 +797,17 @@ def kiri_extract_unified(game_dir, out_root, log, progress, out_name='提取资�
                 lambda p: p.lower().endswith(('.tlg', '.webp')),
                 handle_fgimage, '立绘', parallel=True)
 
-        # 其它：voice/scn/video 等不按前缀处理，留给内容识别兜底
+        # 视频：video*.xp3 全部内容 → 视频
+        elif al.startswith('video'):
+            known = True
+            process_archive(
+                arch,
+                lambda p: p.lower().endswith(('.mp4', '.avi', '.wmv', '.mov', '.mkv',
+                                              '.m2ts', '.webm', '.flv', '.mpg', '.mpeg',
+                                              '.ogv', '.dat')),
+                handle_video, '视频')
+
+        # 其它：voice/scn 等不按前缀处理，留给内容识别兜底
         if known:
             handled.add(arch)
 
@@ -830,6 +882,13 @@ def kiri_extract_unified(game_dir, out_root, log, progress, out_name='提取资�
                 arch,
                 lambda p: p.lower().endswith(('.tlg', '.webp')),
                 handle_fgimage, '立绘', parallel=True)
+        video = [p for p in lows if p.lower().endswith(_VIDEO_EXTS)]
+        if video:
+            matched = True
+            process_archive(
+                arch,
+                lambda p: p.lower().endswith(_VIDEO_EXTS),
+                handle_video, '视频')
         if pimg or ev_png:
             matched = True
             process_archive(
@@ -844,6 +903,8 @@ def kiri_extract_unified(game_dir, out_root, log, progress, out_name='提取资�
     for arch in xp3_files:
         if arch not in handled:
             process_archive_by_content(arch)
+
+    _collect_videos(out_dir, log)
 
 
 def kiri_extract_steam(game_dir, out_root, log, progress, out_name='提取资源'):
@@ -1225,7 +1286,7 @@ class App:
         topbar.pack(fill='x', padx=10, pady=(10, 0))
         info = tk.Label(
             topbar,
-            text='输出：所选输出目录下自动生成自定义文件夹，内含 BGM / CG / 背景 / 立绘 四个子文件夹',
+            text='输出：所选输出目录下自动生成自定义文件夹，内含 BGM / CG / 背景 / 立绘 / 视频 五个子文件夹',
             fg='#555555', anchor='w', justify='left')
         info.pack(side='left', fill='x', expand=True)
         tk.Button(topbar, text='设置', width=8, command=self.open_settings).pack(side='right', padx=(8, 0))
