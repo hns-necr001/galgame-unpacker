@@ -68,7 +68,7 @@ def save_config(cfg):
     except OSError:
         pass
 
-OUT_SUBDIRS = ('BGM', 'CG', '背景', '立绘', '视频')
+OUT_SUBDIRS = ('BGM', 'CG', '背景', '立绘', '视频', '语音', 'UI')
 
 sys.path.insert(0, XP3LIB)
 try:
@@ -521,22 +521,49 @@ def _reclassify_other(out_dir, log=None):
     other = os.path.join(out_dir, '其他')
     if not os.path.isdir(other):
         return
+    # 子目录规则:前缀 → 分类
     rules = (('bgimage', '背景'), ('bgm', 'BGM'), ('fgimage', '立绘'),
              ('evimage', 'CG'), ('movie', '视频'), ('video', '视频'))
-    # 1) 子目录规则
+    ui_dirs = ('image', 'font', 'system', 'sysscn', 'uipsd', 'k2compat', 'rule',
+               'thum', 'sound', 'ui', 'main', 'scn', 'scenario', 'script', 'icon',
+               'title', 'config', 'common')
+    voice_dirs = ('kr', 'my', 'sf', 'sr', 'yt', 'hk', 'kd', 'ms', 'na', 'st',
+                  'vo', 'voice', 'audio', 'se', 'garbage')
+    audio_exts = ('.ogg', '.opus', '.wav', '.mp3', '.acb', '.hca')
+
+    def is_voice_dir(path):
+        low_dir = os.path.basename(path).lower()
+        if low_dir in voice_dirs:
+            return True
+        # 目录里几乎全是音频(且不含 bgm 开头)→ 语音
+        try:
+            files = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
+            if len(files) >= 3:
+                ogg = sum(1 for f in files if f.lower().endswith(audio_exts)
+                          and not f.lower().startswith('bgm'))
+                return ogg / len(files) >= 0.8
+        except OSError:
+            pass
+        return False
+
+    # 1) 子目录分类
     for sub in os.listdir(other):
         sub_path = os.path.join(other, sub)
         if not os.path.isdir(sub_path):
             continue
         low = sub.lower()
         target = next((v for k, v in rules if low.startswith(k)), None)
+        if target is None and low.startswith(ui_dirs):
+            target = 'UI'
+        if target is None and is_voice_dir(sub_path):
+            target = '语音'
         if target:
             dest = os.path.join(out_dir, target)
             ensure_dir(dest)
             if log:
                 log(f'[整理] 移动 {sub} -> {target}')
             _move_tree(sub_path, dest, log)
-    # 2) 顶层文件规则(CG 大图 / 立绘 tlg / 视频)
+    # 2) 顶层文件分类
     for f in os.listdir(other):
         path = os.path.join(other, f)
         if os.path.isdir(path):
@@ -549,6 +576,10 @@ def _reclassify_other(out_dir, log=None):
             target = '立绘'
         elif low.endswith(_VIDEO_EXTS):
             target = '视频'
+        elif low.endswith(audio_exts) and not low.startswith('bgm'):
+            target = '语音'
+        elif low.endswith(('.tjs', '.ks', '.scn', '.csv', '.func', '.asd', '.ini', '.txt')):
+            target = 'UI'
         if target:
             dest = os.path.join(out_dir, target)
             ensure_dir(dest)
@@ -611,7 +642,7 @@ def _extract_with_garbro_cli(cli, game_dir, out_root, out_name, log, progress):
     out_dir = os.path.join(out_root, out_name)
     ensure_dir(out_dir)
     targets = {'bgimage': '背景', 'evimage': 'CG', 'fgimage': '立绘', 'bgm': 'BGM',
-               'video': '视频'}
+               'video': '视频', 'voice': '语音'}
     no_window = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     xp3s = sorted(f for f in os.listdir(game_dir) if f.lower().endswith('.xp3'))
     if not xp3s:
@@ -1355,7 +1386,7 @@ class App:
         topbar.pack(fill='x', padx=10, pady=(10, 0))
         info = tk.Label(
             topbar,
-            text='输出：所选输出目录下自动生成自定义文件夹，内含 BGM / CG / 背景 / 立绘 / 视频 五个子文件夹',
+            text='输出：所选输出目录下自动生成自定义文件夹：BGM / CG / 背景 / 立绘 / 视频 / 语音 / UI',
             fg='#555555', anchor='w', justify='left')
         info.pack(side='left', fill='x', expand=True)
         tk.Button(topbar, text='设置', width=8, command=self.open_settings).pack(side='right', padx=(8, 0))
