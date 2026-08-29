@@ -508,12 +508,14 @@ def _extract_with_garbro_cli(cli, game_dir, out_root, out_name, log, progress):
     out_dir = os.path.join(out_root, out_name)
     ensure_dir(out_dir)
     targets = {'bgimage': '背景', 'evimage': 'CG', 'fgimage': '立绘', 'bgm': 'BGM'}
+    no_window = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     xp3s = sorted(f for f in os.listdir(game_dir) if f.lower().endswith('.xp3'))
     if not xp3s:
         # 非 xp3 游戏(其他引擎):整目录交给 C# 核心
         log('[C#核心] 未发现 xp3,交给 GARbro 核心整体解包')
         subprocess.run([cli, 'extract', game_dir, out_dir],
-                       capture_output=True, text=True, encoding='utf-8', errors='replace')
+                       capture_output=True, text=True, encoding='utf-8', errors='replace',
+                       creationflags=no_window)
         log('[C#核心] 完成')
         return
     for i, arch in enumerate(xp3s):
@@ -522,7 +524,8 @@ def _extract_with_garbro_cli(cli, game_dir, out_root, out_name, log, progress):
         ensure_dir(dest)
         log(f'[C#核心] 解包 {arch} -> {sub or "其他"}')
         r = subprocess.run([cli, 'extract', os.path.join(game_dir, arch), dest],
-                           capture_output=True, text=True, encoding='utf-8', errors='replace')
+                           capture_output=True, text=True, encoding='utf-8', errors='replace',
+                           creationflags=no_window)
         if r.returncode != 0 and r.stderr:
             tail = r.stderr.strip().splitlines()
             if tail:
