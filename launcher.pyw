@@ -493,7 +493,7 @@ def _steam_decrypt(data):
 
 # 视频扩展名(用于收拢与识别)
 _VIDEO_EXTS = ('.mp4', '.avi', '.wmv', '.mov', '.mkv', '.m2ts', '.webm',
-               '.flv', '.mpg', '.mpeg', '.ogv', '.dat', '.bik', '.ivf')
+               '.flv', '.mpg', '.mpeg', '.ogv', '.dat', '.bik', '.ivf', '.amv')
 
 
 def _move_tree(src_root, dest_root, log=None):
@@ -517,12 +517,13 @@ def _move_tree(src_root, dest_root, log=None):
 
 
 def _reclassify_other(out_dir, log=None):
-    """把「其他」目录里能识别的子目录(如 data.xp3 里的 bgimage/bgm)移到对应分类。"""
+    """把「其他」目录里能识别的内容移到对应分类(混合包如 data.xp3 的兜底整理)。"""
     other = os.path.join(out_dir, '其他')
     if not os.path.isdir(other):
         return
     rules = (('bgimage', '背景'), ('bgm', 'BGM'), ('fgimage', '立绘'),
              ('evimage', 'CG'), ('movie', '视频'), ('video', '视频'))
+    # 1) 子目录规则
     for sub in os.listdir(other):
         sub_path = os.path.join(other, sub)
         if not os.path.isdir(sub_path):
@@ -535,6 +536,31 @@ def _reclassify_other(out_dir, log=None):
             if log:
                 log(f'[整理] 移动 {sub} -> {target}')
             _move_tree(sub_path, dest, log)
+    # 2) 顶层文件规则(CG 大图 / 立绘 tlg / 视频)
+    for f in os.listdir(other):
+        path = os.path.join(other, f)
+        if os.path.isdir(path):
+            continue
+        low = f.lower()
+        target = None
+        if low.endswith(('.png', '.pimg')) and low.startswith(('ev', 'large_ev')):
+            target = 'CG'
+        elif low.endswith('.tlg'):
+            target = '立绘'
+        elif low.endswith(_VIDEO_EXTS):
+            target = '视频'
+        if target:
+            dest = os.path.join(out_dir, target)
+            ensure_dir(dest)
+            try:
+                if exists_nonempty(os.path.join(dest, f)):
+                    os.remove(path)
+                else:
+                    shutil.move(path, dest)
+                    if log:
+                        log(f'[整理] {f} -> {target}')
+            except OSError:
+                pass
 
 
 def _collect_videos(out_dir, log=None):
