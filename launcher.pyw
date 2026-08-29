@@ -1216,7 +1216,6 @@ class App:
         self.name_var = tk.StringVar(value='提取资源')
         self.status_var = tk.StringVar(value='等待开始...')
         self.progress_var = tk.IntVar(value=0)
-        self._prog_last = None
         self.stop_requested = False
 
         topbar = tk.Frame(root)
@@ -1248,7 +1247,7 @@ class App:
 
         progrow = tk.Frame(root)
         progrow.pack(fill='x', padx=10, pady=5)
-        self.progress_bar = ttk.Progressbar(progrow, variable=self.progress_var, maximum=1, length=380)
+        self.progress_bar = ttk.Progressbar(progrow, variable=self.progress_var, maximum=1, length=520)
         self.progress_bar.pack(side='left', padx=(0, 10))
         tk.Label(progrow, textvariable=self.status_var, anchor='w').pack(side='right', padx=(10, 0))
 
@@ -1297,24 +1296,7 @@ class App:
                     if total > 0:
                         self.progress_bar.configure(maximum=total)
                         self.progress_var.set(cur)
-                    # 简单估算剩余时间
-                    eta = ''
-                    now = time.time()
-                    if self._prog_last and total > 0 and 0 < cur <= total:
-                        t0, c0 = self._prog_last
-                        dt = now - t0
-                        dc = cur - c0
-                        if dt > 0 and dc > 0:
-                            speed = dc / dt
-                            remain = (total - cur) / speed
-                            if remain > 0:
-                                if remain < 60:
-                                    eta = f'，预计剩余 {int(remain)} 秒'
-                                else:
-                                    eta = f'，预计剩余 {remain/60:.1f} 分钟'
-                    if cur > 0:
-                        self._prog_last = (now, cur)
-                    self.status_var.set(f'{text}  ({cur}/{total}){eta}')
+                    self.status_var.set(f'{text}  ({cur}/{total})')
         except queue.Empty:
             pass
         self.root.after(100, self.poll_queue)
