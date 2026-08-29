@@ -41,7 +41,7 @@ LOG_PATH = os.path.join(TOOL_DIR, '解包日志.txt')
 _LOG_LOCK = threading.Lock()
 
 # ---------- 更新 / 设置 ----------
-APP_VERSION = 'v0.1.2'                    # 当前版本号（与 GitHub Release 的 tag 对比）
+APP_VERSION = 'v0.1.3'                    # 当前版本号（与 GitHub Release 的 tag 对比）
 UPDATE_REPO = 'hns-necr001/galgame-unpacker'  # 默认更新源（GitHub 仓库 owner/repo）
 CONFIG_DIR = os.path.join(os.environ.get('APPDATA', TOOL_DIR), 'Galgame解包工具')
 CONFIG_PATH = os.path.join(CONFIG_DIR, 'settings.json')

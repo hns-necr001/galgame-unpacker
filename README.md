@@ -1,12 +1,16 @@
 # Galgame 解包工具
 
-一个通用的 Galgame 资源解包工具，目前仅支持 **Unity（Naninovel）** 和 **KiriKiri（.xp3）** 两类引擎。
-目前正在一步一步添加功能，还有修bug
+一个通用的 Galgame 资源解包工具。**Python 前端 + C# 解包核心(GARbro)** 混合架构：
+- 内置 Python 解析：支持 **Unity（Naninovel）** 和 **KiriKiri（.xp3）**
+- 外接 C# 核心：集成 GARbro 全部格式（数百种引擎），自动加密方案识别
+- 目前正在一步一步添加功能，还有修 bug
 
 ## 功能
 
 - 自动识别游戏引擎，无需手动指定类型
-- 解包结果统一输出到 `BGM / CG / 背景 / 立绘` 四个文件夹
+- 解包结果统一输出到 `BGM / CG / 背景 / 立绘 / 视频 / 语音 / UI` 七个文件夹
+- 混合包（如 `data.xp3`）解包后自动按子目录再分类，语音 / 视频 / UI 各归其位
+- C# 解包核心（GARbro）：支持数百种游戏格式，加密方案自动识别（Cx / YuzuCrypt / HashCrypt 等）
 - KiriKiri 支持“内容识别兜底”：即使 `.xp3` 被乱改名、甚至后缀被伪装，也能通过文件头识别并扫描内部内容自动分类
 - 支持多线程并行转换图片，速度更快
 - 自动处理各种特殊格式：
@@ -16,7 +20,18 @@
   - 平铺立绘自动按角色名建子目录
 - 界面实时显示 `（已完成/总数）` 进度
 - 支持图形界面和命令行两种模式
-- 直接解压压缩包：支持选取 zip / 7z / rar，自动解压并识别游戏目录（7z/rar 需系统已装 7-Zip 或 WinRAR）
+
+## 外接应用（程序名称）
+
+本工具会调用以下外接程序，请勿改名或删除：
+
+| 程序名称 | 用途 |
+|---|---|
+| `garbro_cli.exe` | **C# 解包核心**（GARbro 命令行版），位于 `tools/garbro_cli/`，Python 前端自动调用，支持数百种游戏格式；解包时如果缺少该程序则退回内置 Python 算法 |
+| `PsbDecompile.exe` / `EmtConvert.exe` | PSB/Pimg 事件图拆图，位于 `tools/freemote/` |
+| `tlg2png.exe` | TLG 立绘转换，位于 `tools/tlg2png/` |
+
+> `garbro_cli.exe` 由 GARbro 开源项目（C# / .NET 8）编译而来，源码在 `tools/garbro/` 与 `tools/garbro_cli/`，需要 .NET 8 SDK 才能重新编译。
 
 ## 目录结构
 
@@ -25,6 +40,8 @@ Galgame解包工具/
 ├─ launcher.pyw            # 主程序源码（GUI + CLI）
 ├─ xp3lib/                 # 自研 KiriKiri .xp3 解析库
 ├─ tools/                  # 外部转换工具（freemote / tlg2png）
+│  ├─ garbro/              # GARbro 开源项目源码（C#）
+│  └─ garbro_cli/          # C# 解包核心工程（编译后为 garbro_cli.exe）
 ├─ Galgame解包工具.spec    # PyInstaller 打包配置
 ├─ requirements.txt        # Python 依赖
 ├─ LICENSE                 # MIT 许可证
@@ -69,6 +86,7 @@ python launcher.pyw
 ```
 
 KiriKiri 解包需要 `tools/` 目录下的外部工具：
+- `tools/garbro_cli/garbro_cli.exe`（C# 解包核心，可选；存在时优先使用，支持全部 GARbro 格式）
 - `tools/freemote/PsbDecompile.exe`、`EmtConvert.exe`（PSB/Pimg 转换）
 - `tools/tlg2png/tlg2png.exe`（TLG 转换）
 
