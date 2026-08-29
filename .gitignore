@@ -20,3 +20,11 @@ release/
 # ÁÙÊ±ÏÂÔØµÄµÚÈı·½¹¤¾ß£¨KrkrExtract / CxdecExtractor£©
 _krkr_tools/
 
+
+# GARbro C# æ ¸å¿ƒ(ç¼–è¯‘äº§ç‰©ä¸ NuGet åŒ…)
+tools/garbro/packages/
+tools/garbro/.nuget/
+tools/garbro/bin/
+tools/garbro/obj/
+tools/garbro_cli/bin/
+tools/garbro_cli/obj/

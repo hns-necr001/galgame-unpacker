@@ -1,0 +1,6 @@
+<Project>
+  <!-- 让 dotnet build 能编译 GARbro 的 .NET Framework 项目(不需要安装 developer pack) -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

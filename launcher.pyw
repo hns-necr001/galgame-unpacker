@@ -564,6 +564,46 @@ def _steam_decrypt(data):
 
 
 
+def _find_garbro_cli():
+    """查找 C# 解包核心(garbro_cli.exe)。"""
+    for c in (os.path.join(TOOL_DIR, 'tools', 'garbro_cli', 'garbro_cli.exe'),
+              os.path.join(TOOL_DIR, 'garbro_cli', 'garbro_cli.exe'),
+              os.path.join(TOOL_DIR, 'garbro_cli.exe'),
+              os.path.join(TOOL_DIR, 'tools', 'garbro_cli', 'bin', 'Release',
+                           'net8.0-windows', 'garbro_cli.exe')):
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def _extract_with_garbro_cli(cli, game_dir, out_root, out_name, log, progress):
+    """用 C# GARbro 核心解包(支持 GARbro 全部格式),按 xp3 类型归档。"""
+    out_dir = os.path.join(out_root, out_name)
+    ensure_dir(out_dir)
+    targets = {'bgimage': '背景', 'evimage': 'CG', 'fgimage': '立绘', 'bgm': 'BGM'}
+    xp3s = sorted(f for f in os.listdir(game_dir) if f.lower().endswith('.xp3'))
+    if not xp3s:
+        # 非 xp3 游戏(其他引擎):整目录交给 C# 核心
+        log('[C#核心] 未发现 xp3,交给 GARbro 核心整体解包')
+        subprocess.run([cli, 'extract', game_dir, out_dir],
+                       capture_output=True, text=True, encoding='utf-8', errors='replace')
+        log('[C#核心] 完成')
+        return
+    for i, arch in enumerate(xp3s):
+        sub = next((v for k, v in targets.items() if arch.lower().startswith(k)), None)
+        dest = os.path.join(out_dir, sub) if sub else os.path.join(out_dir, '其他')
+        ensure_dir(dest)
+        log(f'[C#核心] 解包 {arch} -> {sub or "其他"}')
+        r = subprocess.run([cli, 'extract', os.path.join(game_dir, arch), dest],
+                           capture_output=True, text=True, encoding='utf-8', errors='replace')
+        if r.returncode != 0 and r.stderr:
+            tail = r.stderr.strip().splitlines()
+            if tail:
+                log('[C#核心] ' + tail[-1])
+        progress('解包', i + 1, len(xp3s), arch)
+    log('[C#核心] 完成')
+
+
 def kiri_extract_unified(game_dir, out_root, log, progress, out_name='提取资源'):
     """通用 KiriKiri 提取器（自动兼容柚子社/ATRI 等结构）：
     - bgm.xp3 / data.xp3 中 bgm 开头的音频 -> BGM
@@ -573,6 +613,13 @@ def kiri_extract_unified(game_dir, out_root, log, progress, out_name='提取资�
     """
     if not XP3_OK:
         log('[错误] XP3 解包库加载失败，请检查 xp3lib 目录是否完整。')
+        return
+
+    # C# GARbro 核心优先(覆盖 GARbro 全部格式,含 Hxv4 等)
+    _cli = _find_garbro_cli()
+    if _cli is not None:
+        log(f'[C#核心] 检测到 garbro_cli({_cli})，使用 C# 解包核心')
+        _extract_with_garbro_cli(_cli, game_dir, out_root, out_name, log, progress)
         return
 
     # Steam 版 xp3（文件名哈希 + XOR 数据加密）：数据层尚未完整逆向，明确提示避免空跑
