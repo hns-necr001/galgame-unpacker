@@ -644,6 +644,53 @@ class SisMikoCrypt:
         return bytes(out)
 
 
+# PureMoreCrypt 默认字符映射(256 字符,参考 GARbro)
+_DEFAULT_PURE_MORE_MAP = (
+    "0123456789abcdefghijklmnopqrstuvwxyz"
+    "０１２３４５６７８９ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ"
+    "ぁあぃいぅうぇえぉおかがきぎくぐけげこごさざしじすずせぜそぞただ"
+    "ちぢっつづてでとどなにぬねのはばぱひびぴふぶぷへべぺほぼぽまみむ"
+    "めもゃやゅゆょよらりるれろゎわゐゑをんァアィイゥウェエォオカガキ"
+    "ギクグケゲコゴサザシジスズセゼソゾタダチヂッツヅテデトドナニヌネ"
+    "ノハバパヒビピフブプヘベペホボポマミムメモャヤュユョヨラリルレロ"
+    "ヮワヰヱヲンヴヵヶ零一二三四五六七八九十百千万億")
+
+
+class PureMoreCrypt:
+    """PureMoreCrypt:文件名混淆(数据不加密)。
+    混淆名 = SHA256(真实文件名 UTF-16LE) 的前 32 字节经 CharMap 映射 + ".tlg"。
+    真实文件名列表(file_list)需要外部提供(如 GARbro 的 .lst 文件)。"""
+
+    def __init__(self, char_map=None, file_list=None, layer_suffix=''):
+        self.char_map = char_map or _DEFAULT_PURE_MORE_MAP
+        self.file_list = list(file_list) if file_list else []
+        self.layer_suffix = layer_suffix or ''
+        self._names = None
+
+    def _build_map(self):
+        import hashlib
+        d = {}
+        for name in self.file_list:
+            base = name
+            ext_i = name.rfind('.')
+            if ext_i != -1:
+                base = name[:ext_i]
+            if self.layer_suffix:
+                base += self.layer_suffix
+            h = hashlib.sha256(base.encode('utf-16-le')).digest()
+            key = ''.join(self.char_map[x] for x in h[:32]) + '.tlg'
+            d[key] = name
+        return d
+
+    def read_name(self, name):
+        """把混淆文件名还原为真实文件名(数据解密不涉及)。"""
+        if len(name) == 36 and name.endswith('.tlg'):
+            if self._names is None:
+                self._names = self._build_map()
+            return self._names.get(name, name)
+        return name
+
+
 # ---------- 解密器工厂 ----------
 
 # 已实现的算法类型（用于 GUI 展示）
@@ -659,6 +706,7 @@ IMPLEMENTED = {
     'MadoCrypt', 'SmileCrypt', 'KissCrypt', 'PuCaCrypt', 'RhapsodyCrypt',
     'PinPointCrypt', 'SmxCrypt', 'TokidokiCrypt', 'ChainReactionCrypt',
     'HachukanoCrypt', 'ChocolatCrypt', 'XanaduCrypt', 'SisMikoCrypt',
+    'PureMoreCrypt',  # 文件名混淆(需外部 .lst 数据)
 }
 
 
@@ -746,6 +794,8 @@ def build_decoder(alg_type, fields):
         return XanaduCrypt()
     if alg_type == 'SisMikoCrypt':
         return SisMikoCrypt()
+    if alg_type == 'PureMoreCrypt':
+        return PureMoreCrypt(fields.get('<CharMap>k__BackingField') or fields.get('CharMap'))
     # 其他算法尚未实现
     return None
 
