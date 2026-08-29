@@ -496,6 +496,47 @@ _VIDEO_EXTS = ('.mp4', '.avi', '.wmv', '.mov', '.mkv', '.m2ts', '.webm',
                '.flv', '.mpg', '.mpeg', '.ogv', '.dat', '.bik', '.ivf')
 
 
+def _move_tree(src_root, dest_root, log=None):
+    """把 src_root 下的文件移动到 dest_root(保持相对路径),目标已存在不重复。"""
+    for root, _dirs, files in os.walk(src_root):
+        rel = os.path.relpath(root, src_root)
+        for f in files:
+            src = os.path.join(root, f)
+            dest_dir = dest_root if rel == '.' else os.path.join(dest_root, rel)
+            ensure_dir(dest_dir)
+            dest = os.path.join(dest_dir, f)
+            try:
+                if exists_nonempty(dest):
+                    os.remove(src)
+                else:
+                    shutil.move(src, dest)
+                    if log:
+                        log(f'[整理] {os.path.join(rel, f)}')
+            except OSError:
+                pass
+
+
+def _reclassify_other(out_dir, log=None):
+    """把「其他」目录里能识别的子目录(如 data.xp3 里的 bgimage/bgm)移到对应分类。"""
+    other = os.path.join(out_dir, '其他')
+    if not os.path.isdir(other):
+        return
+    rules = (('bgimage', '背景'), ('bgm', 'BGM'), ('fgimage', '立绘'),
+             ('evimage', 'CG'), ('movie', '视频'), ('video', '视频'))
+    for sub in os.listdir(other):
+        sub_path = os.path.join(other, sub)
+        if not os.path.isdir(sub_path):
+            continue
+        low = sub.lower()
+        target = next((v for k, v in rules if low.startswith(k)), None)
+        if target:
+            dest = os.path.join(out_dir, target)
+            ensure_dir(dest)
+            if log:
+                log(f'[整理] 移动 {sub} -> {target}')
+            _move_tree(sub_path, dest, log)
+
+
 def _collect_videos(out_dir, log=None):
     """把输出目录里散落到各文件夹的视频文件收拢到「视频」目录。
     目标已存在同名文件则不重复(删除来源副本)。"""
@@ -569,6 +610,7 @@ def _extract_with_garbro_cli(cli, game_dir, out_root, out_name, log, progress):
                 log('[C#核心] ' + tail[-1])
         progress('解包', i + 1, len(xp3s), arch)
     _collect_videos(out_dir, log)
+    _reclassify_other(out_dir, log)
     log('[C#核心] 完成')
 
 
@@ -905,6 +947,7 @@ def kiri_extract_unified(game_dir, out_root, log, progress, out_name='提取资�
             process_archive_by_content(arch)
 
     _collect_videos(out_dir, log)
+    _reclassify_other(out_dir, log)
 
 
 def kiri_extract_steam(game_dir, out_root, log, progress, out_name='提取资源'):
