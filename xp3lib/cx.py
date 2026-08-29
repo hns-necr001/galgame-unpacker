@@ -200,8 +200,10 @@ class CxEncryption:
         return CxProgram(seed, self.control_block)
 
     def _generate_program(self, seed):
+        # 注意:program 只创建一次,重试时仅 clear()(保留 RNG 种子),
+        # 与 GARbro 原版一致;若每次 new_program 会重置种子导致程序错误。
+        program = self._new_program(seed)
         for stage in (5, 4, 3, 2, 1):
-            program = self._new_program(seed)
             if self._emit_code(program, stage):
                 return program
             program.clear()
